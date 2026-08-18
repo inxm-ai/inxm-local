@@ -1,0 +1,916 @@
+{
+  "format_version": 1,
+  "exported_at": "2026-08-18T18:33:49.349242659Z",
+  "app_version": "0.1.0",
+  "plan": {
+    "metadata": {
+      "id": "256731b2-978c-4d65-8533-0b1b22457e37",
+      "version": 1,
+      "created_at": "2026-08-18T18:33:49.305584255Z",
+      "updated_at": "2026-08-18T18:33:49.305584255Z",
+      "compiled_by": "codex:",
+      "intent": "Build a reusable test-first bugfix workflow for this repository. Accept a bug\nreport, reproduction expectations, a branch name, and the repository root\ndirectory. Abort unless the checkout is clean, switch to main,\nfast-forward-only pull the latest changes and stop without changing the\nworktree if that fails, then create the branch.\n\nInspect the owning module and reproduce the bug with the smallest failing test\nbefore editing production code. Diagnose the failure from evidence, then ask\nthe human to approve starting agent-driven remediation, stating the diagnosis\nand the failing test as evidence. Only after approval, use Codex or Claude\nCode to implement the fix in the appropriate module and rerun the focused\ntest until it passes. This AGENT_CALL requires the experimental agent-steps\nsetting to be enabled and an authenticated Codex or Claude Code account\nselected; abort with that requirement if it is not.\n\nThen apply the `principal-developer` skill\n(`skills/principal-developer/SKILL.md`) as a review gate, run `cargo fmt\n--check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo\ntest --all-targets --all-features`, and all ignored `live_spec_planning`\ntests, fixing findings and repeating relevant checks until clean. Confirm the\ndiff carries no credentials, personal data, proprietary third-party code, or\nlicense-incompatible generated material. Prepare a pull-request title and\nbody with the regression evidence, why the fix is needed, and any follow-up\nwork, ask the human to approve publication, and only after approval push and\ncreate the pull request with `gh` CLI.\n",
+      "parent_plan_id": null,
+      "parent_version": null,
+      "status": "published"
+    },
+    "name": "test_first_rust_bugfix_and_pull_request",
+    "description": "Creates a clean feature branch, adds a minimal failing regression test, obtains approval for agent-driven remediation, verifies the fix through bounded retries and principal-developer review, and publishes an approved pull request.",
+    "inputs": [
+      {
+        "name": "bug_report",
+        "description": "Description of the observed bug and its impact",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "reproduction_expectations",
+        "description": "Expected reproduction scenario and correct behavior",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "branch_name",
+        "description": "Feature branch to create for the bugfix",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "root_directory",
+        "description": "Root directory of the Rust repository",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "directory_path"
+      }
+    ],
+    "config": {
+      "base_branch": "main",
+      "focused_attempt_limit": 4,
+      "remote": "origin",
+      "validation_attempt_limit": 4
+    },
+    "steps": [
+      {
+        "id": "prepare_clean_branch",
+        "name": "Verify clean checkout and create branch",
+        "description": "Inspects tracked and untracked changes, switches to main, performs a fast-forward-only pull, restores the original branch if the pull fails, and creates the requested branch only after success.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "bash",
+          "inline": "set -euo pipefail\nbranch=\"$BRANCH_NAME\"\nbase=\"$BASE_BRANCH\"\nremote=\"$REMOTE_NAME\"\ngit rev-parse --is-inside-work-tree >/dev/null\noriginal_branch=\"$(git symbolic-ref --quiet --short HEAD)\" || { echo 'Refusing to proceed from a detached HEAD.' >&2; exit 1; }\nif [ -n \"$(git status --porcelain=v1 --untracked-files=all)\" ]; then\n  echo 'Checkout is not clean; tracked or untracked changes are present.' >&2\n  exit 1\nfi\ngit check-ref-format --branch \"$branch\" >/dev/null\nif git show-ref --verify --quiet \"refs/heads/$branch\"; then\n  echo \"Local branch already exists: $branch\" >&2\n  exit 1\nfi\ngit switch \"$base\"\nif ! git pull --ff-only \"$remote\" \"$base\"; then\n  restore_status=0\n  git switch \"$original_branch\" || restore_status=$?\n  if [ \"$restore_status\" -ne 0 ]; then\n    echo \"Fast-forward-only pull failed, and restoring $original_branch also failed.\" >&2\n  else\n    echo \"Fast-forward-only pull failed; restored $original_branch without creating $branch.\" >&2\n  fi\n  exit 1\nfi\ngit switch -c \"$branch\"\nprintf 'Clean checkout verified; updated %s/%s with fast-forward-only semantics and created %s.\\n' \"$remote\" \"$base\" \"$branch\"",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "BASE_BRANCH": "${conf.base_branch}",
+            "BRANCH_NAME": "${input.branch_name}",
+            "REMOTE_NAME": "${conf.remote}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 300
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "preflight_receipt",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 300,
+        "retry": null
+      },
+      {
+        "id": "investigate_and_add_regression",
+        "name": "Investigate and add the failing regression",
+        "description": "Requires experimental agent steps and an authenticated Codex or Claude Code account. Failure to launch must abort with that prerequisite.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Experimental agent steps must be enabled and an authenticated Codex or Claude Code account must be selected; abort and state that exact requirement if the agent cannot run. Investigate this Rust repository using the bug report and reproduction expectations below. Identify the owning module, inspect relevant implementation and existing tests, and add the smallest focused regression test that reproduces the bug. Run that focused test and confirm it fails for the expected reason. Do not edit production code, do not fix the bug, and do not make unrelated changes. Bug report: ${input.bug_report}\nReproduction expectations: ${input.reproduction_expectations}\nReturn only one JSON object with exactly these keys: diagnosis (concise evidence-based root-cause diagnosis), cargo_args (JSON array of arguments following the cargo executable that deterministically reruns only the focused regression), failing_test_evidence (concise command and observed expected failure), and regression_test_path (repository-relative path).",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [
+          "prepare_clean_branch"
+        ],
+        "outputs": [
+          {
+            "name": "diagnosis",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "cargo_args",
+            "description": null,
+            "value_type": "array"
+          },
+          {
+            "name": "failing_test_evidence",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "regression_test_path",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": null
+      },
+      {
+        "id": "reproduce_failing_test",
+        "name": "Deterministically reproduce the failing test",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst cp = require('child_process');\nconst cargoArgs = JSON.parse(fs.readFileSync(0, 'utf8'));\nif (!Array.isArray(cargoArgs) || cargoArgs.some(x => typeof x !== 'string')) throw new Error('cargo_args must be an array of strings');\nconst r = cp.spawnSync('cargo', cargoArgs, {encoding: 'utf8', maxBuffer: 20 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.investigate_and_add_regression.cargo_args}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [
+          "investigate_and_add_regression"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": null
+      },
+      {
+        "id": "assert_regression_fails",
+        "name": "Require the regression to fail before remediation",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst evidence = fs.readFileSync(0, 'utf8');\nif (String(process.env.TEST_SUCCEEDED).toLowerCase() === 'true') {\n  throw new Error('The new regression test passed before production remediation; aborting because test-first reproduction was not established.');\n}\nprocess.stdout.write(`Regression failed before remediation with exit code ${process.env.TEST_EXIT_CODE}.\\n${evidence}`);",
+          "file": null,
+          "args": [],
+          "stdin": "${step.reproduce_failing_test.stdout}",
+          "env": {
+            "TEST_EXIT_CODE": "${step.reproduce_failing_test.exit_code}",
+            "TEST_SUCCEEDED": "${step.reproduce_failing_test.success}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 60
+        },
+        "depends_on": [
+          "reproduce_failing_test"
+        ],
+        "outputs": [
+          {
+            "name": "verified_failure_evidence",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 60,
+        "retry": null
+      },
+      {
+        "id": "approve_remediation",
+        "name": "Approve agent-driven remediation",
+        "description": null,
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Approve starting agent-driven remediation?\n\nDiagnosis:\n${step.investigate_and_add_regression.diagnosis}\n\nFailing regression evidence:\n${step.investigate_and_add_regression.failing_test_evidence}\n\nDeterministic reproduction:\n${step.assert_regression_fails.verified_failure_evidence}\n\nApproval requires experimental agent steps to be enabled and an authenticated Codex or Claude Code account to be selected. Reject to terminate without production-code remediation.",
+          "response_field": "remediation_approval",
+          "approval_required": true
+        },
+        "depends_on": [
+          "assert_regression_fails",
+          "investigate_and_add_regression"
+        ],
+        "outputs": [
+          {
+            "name": "remediation_approval",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 86400,
+        "retry": null
+      },
+      {
+        "id": "implement_initial_fix",
+        "name": "Implement the initial fix",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Implement the smallest correct production fix in the owning module for this approved bug. Preserve the regression test and avoid unrelated changes. Use the supplied diagnosis and evidence rather than rediscovering the problem. Leave acceptance to the typed focused-test retry that follows; do not claim success based on prose. Diagnosis: ${step.investigate_and_add_regression.diagnosis}\nRegression path: ${step.investigate_and_add_regression.regression_test_path}\nFailing evidence: ${step.assert_regression_fails.verified_failure_evidence}",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [
+          "approve_remediation"
+        ],
+        "outputs": [
+          {
+            "name": "implementation_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": null
+      },
+      {
+        "id": "focused_check",
+        "name": "Run the focused regression",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst cp = require('child_process');\nconst cargoArgs = JSON.parse(fs.readFileSync(0, 'utf8'));\nif (!Array.isArray(cargoArgs) || cargoArgs.some(x => typeof x !== 'string')) throw new Error('cargo_args must be an array of strings');\nconst r = cp.spawnSync('cargo', cargoArgs, {encoding: 'utf8', maxBuffer: 20 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.investigate_and_add_regression.cargo_args}",
+          "env": {
+            "ATTEMPT": "${item.attempt}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [
+          "implement_initial_fix"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": null
+      },
+      {
+        "id": "make_attempts",
+        "name": "Create bounded retry attempts",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "process.stdout.write(JSON.stringify([1, 2, 3, 4]));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "implement_initial_fix"
+        ],
+        "outputs": [
+          {
+            "name": "attempts",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "aggregate_focused_check",
+        "name": "Aggregate focused-test status",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "process.stdout.write(String(process.env.FOCUSED_SUCCESS).toLowerCase() === 'true' ? 'true' : 'false');",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "FOCUSED_SUCCESS": "${step.focused_check.success}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "focused_check"
+        ],
+        "outputs": [
+          {
+            "name": "all_passed",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "focused_fix_retries",
+        "name": "Retry focused verification and repair",
+        "description": null,
+        "config": {
+          "type": "FAN_OUT",
+          "over": "make_attempts.attempts",
+          "item_var": "attempt",
+          "spawn_steps": [
+            "focused_check",
+            "aggregate_focused_check",
+            "focused_result_condition",
+            "repair_focused_failure"
+          ],
+          "until": "${step.aggregate_focused_check.all_passed} == true"
+        },
+        "depends_on": [
+          "make_attempts"
+        ],
+        "outputs": [
+          {
+            "name": "results",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 7200,
+        "retry": null
+      },
+      {
+        "id": "cargo_all_tests",
+        "name": "Run all Rust tests",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst r = cp.spawnSync('cargo', ['test', '--all-targets', '--all-features'], {encoding: 'utf8', maxBuffer: 40 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "ATTEMPT": "${item.attempt}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 3600
+        },
+        "depends_on": [
+          "focused_fix_retries"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 3600,
+        "retry": null
+      },
+      {
+        "id": "cargo_clippy_check",
+        "name": "Run cargo clippy",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst r = cp.spawnSync('cargo', ['clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'], {encoding: 'utf8', maxBuffer: 30 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "ATTEMPT": "${item.attempt}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [
+          "focused_fix_retries"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1800,
+        "retry": null
+      },
+      {
+        "id": "cargo_fmt_check",
+        "name": "Run cargo fmt check",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst r = cp.spawnSync('cargo', ['fmt', '--check'], {encoding: 'utf8', maxBuffer: 20 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "ATTEMPT": "${item.attempt}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 600
+        },
+        "depends_on": [
+          "focused_fix_retries"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 600,
+        "retry": null
+      },
+      {
+        "id": "focused_result_condition",
+        "name": "Decide whether focused remediation is complete",
+        "description": null,
+        "config": {
+          "type": "CONDITION",
+          "expression": "${step.aggregate_focused_check.all_passed} == true",
+          "true_steps": [],
+          "false_steps": [
+            "repair_focused_failure"
+          ]
+        },
+        "depends_on": [
+          "aggregate_focused_check"
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "live_spec_ignored_tests",
+        "name": "Run ignored live-spec planning tests",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst r = cp.spawnSync('cargo', ['test', '--test', 'live_spec_planning', '--', '--ignored'], {encoding: 'utf8', maxBuffer: 40 * 1024 * 1024});\nif (r.error) throw r.error;\nprocess.stdout.write(JSON.stringify({success: r.status === 0, exit_code: r.status, stdout: r.stdout || '', stderr: r.stderr || ''}));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "ATTEMPT": "${item.attempt}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 3600
+        },
+        "depends_on": [
+          "focused_fix_retries"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "exit_code",
+            "description": null,
+            "value_type": "number"
+          },
+          {
+            "name": "stdout",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "stderr",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 3600,
+        "retry": null
+      },
+      {
+        "id": "principal_review_gate",
+        "name": "Apply principal-developer review and compliance gate",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Act as a read-only review gate for retry attempt ${item.attempt}. Locate and completely read skills/principal-developer/SKILL.md and apply it to review the entire branch diff against main. Do not edit files and do not run the cargo acceptance commands, because typed steps perform those checks. Inspect tracked, staged, and untracked changes. Identify correctness, architecture, maintainability, testing, observability, or repository-convention findings. Also confirm whether the complete diff contains no credentials, secrets, personal data, proprietary third-party code, or license-incompatible generated material. Treat uncertainty or inability to locate/apply the skill as failure. Return only one JSON object with exactly these keys: success (true only when there are no review or compliance findings), findings (array of concise actionable strings), and compliance_confirmation (concise audit statement).",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [
+          "focused_fix_retries"
+        ],
+        "outputs": [
+          {
+            "name": "success",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "findings",
+            "description": null,
+            "value_type": "array"
+          },
+          {
+            "name": "compliance_confirmation",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": null
+      },
+      {
+        "id": "validation_retries",
+        "name": "Repeat review and validation until clean",
+        "description": null,
+        "config": {
+          "type": "FAN_OUT",
+          "over": "make_attempts.attempts",
+          "item_var": "attempt",
+          "spawn_steps": [
+            "principal_review_gate",
+            "cargo_fmt_check",
+            "cargo_clippy_check",
+            "cargo_all_tests",
+            "live_spec_ignored_tests",
+            "aggregate_validation",
+            "validation_condition",
+            "repair_validation_findings"
+          ],
+          "until": "${step.aggregate_validation.all_passed} == true"
+        },
+        "depends_on": [
+          "focused_fix_retries",
+          "make_attempts"
+        ],
+        "outputs": [
+          {
+            "name": "results",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 21600,
+        "retry": null
+      },
+      {
+        "id": "aggregate_validation",
+        "name": "Aggregate review and validation results",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const keys = ['REVIEW_OK', 'FMT_OK', 'CLIPPY_OK', 'TESTS_OK', 'LIVE_SPEC_OK'];\nconst passed = keys.every(k => String(process.env[k]).toLowerCase() === 'true');\nprocess.stdout.write(passed ? 'true' : 'false');",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "CLIPPY_OK": "${step.cargo_clippy_check.success}",
+            "FMT_OK": "${step.cargo_fmt_check.success}",
+            "LIVE_SPEC_OK": "${step.live_spec_ignored_tests.success}",
+            "REVIEW_OK": "${step.principal_review_gate.success}",
+            "TESTS_OK": "${step.cargo_all_tests.success}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "cargo_all_tests",
+          "cargo_clippy_check",
+          "cargo_fmt_check",
+          "live_spec_ignored_tests",
+          "principal_review_gate"
+        ],
+        "outputs": [
+          {
+            "name": "all_passed",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "prepare_pr_draft",
+        "name": "Prepare pull-request title and body",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "You write concise, factual pull-request metadata. Return strict JSON only, with no Markdown fence.",
+          "user_prompt": "Prepare a pull-request title and body for the validated Rust bugfix below. The body must include the regression evidence, why the fix is needed, the validation commands that passed, and any honest follow-up work. Do not invent implementation details. Return exactly one JSON object with string keys title and body.\n\nBug report: ${input.bug_report}\nReproduction expectations: ${input.reproduction_expectations}\nDiagnosis: ${step.investigate_and_add_regression.diagnosis}\nRegression test: ${step.investigate_and_add_regression.regression_test_path}\nPre-fix evidence: ${step.investigate_and_add_regression.failing_test_evidence}\nValidation completed successfully: focused regression; cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test --all-targets --all-features; cargo test --test live_spec_planning -- --ignored; principal-developer and compliance review.",
+          "output_field": "draft_json",
+          "max_tokens": 1600,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "validation_retries"
+        ],
+        "outputs": [
+          {
+            "name": "draft_json",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 120,
+        "retry": null
+      },
+      {
+        "id": "repair_focused_failure",
+        "name": "Repair the focused-test failure",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "The typed focused regression still fails on retry attempt ${item.attempt}. Inspect the supplied same-iteration evidence and edit only what is necessary to repair the implementation while preserving the regression. Do not rerun the test yourself; the next deterministic retry iteration will verify the workspace. Diagnosis: ${step.investigate_and_add_regression.diagnosis}\nExit code: ${step.focused_check.exit_code}\nStdout: ${step.focused_check.stdout}\nStderr: ${step.focused_check.stderr}",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [
+          "focused_result_condition"
+        ],
+        "outputs": [
+          {
+            "name": "repair_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": null
+      },
+      {
+        "id": "parse_pr_draft",
+        "name": "Validate pull-request metadata",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst parsed = JSON.parse(fs.readFileSync(0, 'utf8'));\nif (!parsed || typeof parsed.title !== 'string' || !parsed.title.trim() || typeof parsed.body !== 'string' || !parsed.body.trim()) throw new Error('PR draft must contain non-empty title and body strings');\nprocess.stdout.write(JSON.stringify({title: parsed.title.trim(), body: parsed.body.trim()}));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.prepare_pr_draft.draft_json}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "prepare_pr_draft"
+        ],
+        "outputs": [
+          {
+            "name": "title",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "body",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "validation_condition",
+        "name": "Decide whether the branch is clean",
+        "description": null,
+        "config": {
+          "type": "CONDITION",
+          "expression": "${step.aggregate_validation.all_passed} == true",
+          "true_steps": [],
+          "false_steps": [
+            "repair_validation_findings"
+          ]
+        },
+        "depends_on": [
+          "aggregate_validation"
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": null
+      },
+      {
+        "id": "approve_publication",
+        "name": "Approve pull-request publication",
+        "description": null,
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Approve pushing branch ${input.branch_name} and creating this pull request?\n\nTitle:\n${step.parse_pr_draft.title}\n\nBody:\n${step.parse_pr_draft.body}",
+          "response_field": "publication_approval",
+          "approval_required": true
+        },
+        "depends_on": [
+          "parse_pr_draft"
+        ],
+        "outputs": [
+          {
+            "name": "publication_approval",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 86400,
+        "retry": null
+      },
+      {
+        "id": "repair_validation_findings",
+        "name": "Repair review or validation findings",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Repair the same-iteration review and validation failures below. Completely read and apply skills/principal-developer/SKILL.md before editing. Make the smallest appropriate changes, including formatting or code/test corrections, and remove any credentials, personal data, proprietary third-party code, or license-incompatible generated material identified by review. Do not rerun the checks; the next deterministic iteration verifies all changes.\nReview success: ${step.principal_review_gate.success}\nReview findings: ${step.principal_review_gate.findings}\nCompliance audit: ${step.principal_review_gate.compliance_confirmation}\nfmt exit ${step.cargo_fmt_check.exit_code} stdout: ${step.cargo_fmt_check.stdout} stderr: ${step.cargo_fmt_check.stderr}\nclippy exit ${step.cargo_clippy_check.exit_code} stdout: ${step.cargo_clippy_check.stdout} stderr: ${step.cargo_clippy_check.stderr}\nall-tests exit ${step.cargo_all_tests.exit_code} stdout: ${step.cargo_all_tests.stdout} stderr: ${step.cargo_all_tests.stderr}\nlive-spec exit ${step.live_spec_ignored_tests.exit_code} stdout: ${step.live_spec_ignored_tests.stdout} stderr: ${step.live_spec_ignored_tests.stderr}",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [
+          "validation_condition"
+        ],
+        "outputs": [
+          {
+            "name": "repair_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1800,
+        "retry": null
+      },
+      {
+        "id": "push_branch",
+        "name": "Push the approved branch",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst branch = process.env.BRANCH_NAME;\nconst remote = process.env.REMOTE_NAME;\nconst r = cp.spawnSync('git', ['push', '-u', remote, branch], {encoding: 'utf8', maxBuffer: 20 * 1024 * 1024});\nif (r.error) throw r.error;\nif (r.status !== 0) throw new Error(`git push failed (${r.status}): ${r.stderr || r.stdout}`);\nprocess.stdout.write((r.stdout || r.stderr || `Pushed ${branch}`).trim());",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "BRANCH_NAME": "${input.branch_name}",
+            "REMOTE_NAME": "${conf.remote}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [
+          "approve_publication"
+        ],
+        "outputs": [
+          {
+            "name": "push_receipt",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": null
+      },
+      {
+        "id": "create_pull_request",
+        "name": "Create the pull request",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst cp = require('child_process');\nconst draft = JSON.parse(fs.readFileSync(0, 'utf8'));\nconst r = cp.spawnSync('gh', ['pr', 'create', '--base', process.env.BASE_BRANCH, '--head', process.env.BRANCH_NAME, '--title', draft.title, '--body', draft.body], {encoding: 'utf8', maxBuffer: 20 * 1024 * 1024});\nif (r.error) throw r.error;\nif (r.status !== 0) throw new Error(`gh pr create failed (${r.status}): ${r.stderr || r.stdout}`);\nprocess.stdout.write((r.stdout || '').trim());",
+          "file": null,
+          "args": [],
+          "stdin": "${step.prepare_pr_draft.draft_json}",
+          "env": {
+            "BASE_BRANCH": "${conf.base_branch}",
+            "BRANCH_NAME": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 300
+        },
+        "depends_on": [
+          "push_branch"
+        ],
+        "outputs": [
+          {
+            "name": "pull_request_url",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 300,
+        "retry": null
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pull_request_url",
+        "description": "URL of the approved and published pull request",
+        "source": "${step.create_pull_request.pull_request_url}"
+      }
+    ]
+  },
+  "tools": []
+}

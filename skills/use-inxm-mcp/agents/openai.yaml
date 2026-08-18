@@ -1,0 +1,12 @@
+interface:
+  display_name: "Use INXM Local MCP"
+  short_description: "Run deterministic INXM workflows from coding agents"
+  default_prompt: "Use $use-inxm-mcp to find and safely execute the appropriate INXM Local workflow for this task."
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "inxm-local"
+      description: "Local INXM workflow compiler and deterministic executor"
+      transport: "streamable_http"
+      url: "http://127.0.0.1:39387/mcp"

@@ -1,0 +1,207 @@
+# inxm-soloplayer tool catalog
+#
+# This file defines the tools available to compiled plans.
+# Add tools your workflows need and reference them in plans via TOOL_CALL steps.
+#
+# Recommended MCP servers for this project:
+#   - @modelcontextprotocol/server-filesystem  (local file read/write)
+#   - @modelcontextprotocol/server-fetch        (HTTP fetch)
+#   - @modelcontextprotocol/server-git          (git operations)
+#   - @modelcontextprotocol/server-sqlite       (structured data)
+#
+# Install MCPs globally: npm install -g @modelcontextprotocol/server-filesystem
+# Then configure them here with kind: mcp.
+
+tools:
+
+  # ─── Subprocess tools ──────────────────────────────────────────────────────
+
+  - name: echo
+    description: Echo a message to stdout. Useful for testing and debugging plans.
+    config:
+      kind: subprocess
+      # Dynamic arguments reach subprocess tools as INXM_ARG_* env vars,
+      # so the command expands the message itself.
+      command: sh
+      args: ["-c", "printf '%s\n' \"$INXM_ARG_MESSAGE\""]
+    input_schema:
+      type: object
+      properties:
+        message:
+          type: string
+          description: The text to echo
+      required: [message]
+    output_schema:
+      type: object
+      properties:
+        stdout:
+          type: string
+    allowlisted: true
+
+  - name: shell
+    description: >
+      Run an arbitrary shell command. Use with caution — add only trusted
+      commands to this tool. Arguments are passed via INXM_ARGS (JSON) and
+      INXM_ARG_<KEY> environment variables.
+    config:
+      kind: subprocess
+      command: bash
+      args: [-c]
+    input_schema:
+      type: object
+      properties:
+        script:
+          type: string
+          description: Bash script to execute
+      required: [script]
+    output_schema:
+      type: object
+      properties:
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exit_code:
+          type: integer
+    allowlisted: true
+    timeout_secs: 60
+
+  - name: python
+    description: >
+      Run a Python 3 script. The script receives arguments via the INXM_ARGS
+      environment variable (JSON) and INXM_ARG_<KEY> variables.
+    config:
+      kind: subprocess
+      command: python3
+    input_schema:
+      type: object
+      properties:
+        script:
+          type: string
+          description: Python source code to execute
+      required: [script]
+    output_schema:
+      type: object
+      properties:
+        stdout:
+          type: string
+    allowlisted: true
+    timeout_secs: 120
+
+  # ─── HTTP tools ────────────────────────────────────────────────────────────
+
+  - name: http_get
+    description: Perform an HTTP GET request and return the response body.
+    config:
+      kind: http
+      base_url: ""      # Set via ${conf.base_url} in plan config
+      method: GET
+      path_template: ""
+    input_schema:
+      type: object
+      properties:
+        url:
+          type: string
+          description: Full URL to fetch
+      required: [url]
+    output_schema:
+      type: object
+      properties:
+        body:
+          type: string
+        status_code:
+          type: integer
+    allowlisted: true
+    timeout_secs: 30
+
+  - name: http_post
+    description: Perform an HTTP POST request with a JSON body.
+    config:
+      kind: http
+      base_url: ""
+      method: POST
+      path_template: ""
+    input_schema:
+      type: object
+      properties:
+        url:
+          type: string
+        body:
+          type: object
+          description: Request body (will be JSON-encoded)
+      required: [url]
+    output_schema:
+      type: object
+      properties:
+        body:
+          type: string
+        status_code:
+          type: integer
+    allowlisted: true
+    timeout_secs: 30
+
+  # ─── MCP tools ─────────────────────────────────────────────────────────────
+  # These require the corresponding MCP server to be installed.
+  # Uncomment and configure as needed.
+
+  # - name: fs_read
+  #   description: Read a file from the local filesystem via MCP filesystem server.
+  #   config:
+  #     kind: mcp
+  #     server_command: npx
+  #     server_args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  #     tool_name: read_file
+  #   input_schema:
+  #     type: object
+  #     properties:
+  #       path:
+  #         type: string
+  #         description: Absolute path to the file to read
+  #     required: [path]
+  #   output_schema:
+  #     type: object
+  #     properties:
+  #       contents:
+  #         type: string
+  #   allowlisted: true
+
+  # - name: fs_write
+  #   description: Write content to a file via MCP filesystem server.
+  #   config:
+  #     kind: mcp
+  #     server_command: npx
+  #     server_args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+  #     tool_name: write_file
+  #   input_schema:
+  #     type: object
+  #     properties:
+  #       path:
+  #         type: string
+  #       content:
+  #         type: string
+  #     required: [path, content]
+  #   output_schema:
+  #     type: object
+  #   allowlisted: true
+
+  # - name: fetch
+  #   description: Fetch a URL and return its content via MCP fetch server.
+  #   config:
+  #     kind: mcp
+  #     server_command: uvx
+  #     server_args: [mcp-server-fetch]
+  #     tool_name: fetch
+  #   input_schema:
+  #     type: object
+  #     properties:
+  #       url:
+  #         type: string
+  #       raw:
+  #         type: boolean
+  #     required: [url]
+  #   output_schema:
+  #     type: object
+  #     properties:
+  #       content:
+  #         type: string
+  #   allowlisted: true

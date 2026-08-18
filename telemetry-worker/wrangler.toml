@@ -1,0 +1,19 @@
+name = "inxm-local-telemetry"
+main = "worker.js"
+compatibility_date = "2026-01-01"
+
+# Served at https://telemetry.inxm.ai/v1/event. A custom domain (unlike a
+# plain route) makes Cloudflare create and manage the DNS record for the
+# subdomain automatically.
+routes = [
+  { pattern = "telemetry.inxm.ai", custom_domain = true },
+]
+
+# Workers Analytics Engine: lightweight columnar sink with built-in ~90 day
+# retention and no per-row identity. Query with the SQL API, e.g.
+#   SELECT blob2 AS version, blob3 AS os, SUM(_sample_interval) AS starts
+#   FROM inxm_local_events WHERE timestamp > NOW() - INTERVAL '7' DAY
+#   GROUP BY version, os
+[[analytics_engine_datasets]]
+binding = "TELEMETRY"
+dataset = "inxm_local_events"
