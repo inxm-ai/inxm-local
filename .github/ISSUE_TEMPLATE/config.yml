@@ -1,0 +1,5 @@
+# Keep blank issues enabled: the in-app "Create support ticket" button opens
+# https://github.com/inxm-ai/inxm-local/issues/new?title=...&body=... directly
+# (no `template=` param), which relies on the blank-issue form being
+# available so it can prefill title/body without going through the chooser.
+blank_issues_enabled: true

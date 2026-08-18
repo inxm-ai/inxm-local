@@ -1,0 +1,827 @@
+{
+  "format_version": 1,
+  "exported_at": "2026-08-18T17:48:04.009739423Z",
+  "app_version": "0.1.0",
+  "plan": {
+    "metadata": {
+      "id": "d78188a0-a6ce-44c3-a521-d019e684ec2a",
+      "version": 1,
+      "created_at": "2026-08-18T17:48:03.965085299Z",
+      "updated_at": "2026-08-18T17:48:03.965085299Z",
+      "compiled_by": "codex:",
+      "intent": "Build a reusable feature-development workflow for this repository. Accept a\nfeature request, acceptance expectations, a branch name, and the repository\nroot directory. Inspect the request and repository to identify clean\nmodule-owned implementation packages, propose a plan to the human, and revise\nit from their feedback until they explicitly approve it.\n\nAbort unless the checkout is clean, switch to main, pull latest with\nfast-forward-only semantics and stop without modifying the worktree on\nconflicts, then create the requested branch. Only after the human has\napproved the package plan, use Codex or Claude Code to distribute the\napproved packages across their owning modules and work on independent\npackages concurrently without cross-module pollution. This AGENT_CALL\nrequires the experimental agent-steps setting to be enabled and an\nauthenticated Codex or Claude Code account selected; abort with that\nrequirement if it is not.\n\nIntegrate the results, apply the `principal-developer` skill\n(`skills/principal-developer/SKILL.md`) as a review gate, then run `cargo fmt\n--check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo\ntest --all-targets --all-features`, and all ignored `live_spec_planning`\ntests, fixing findings and repeating relevant checks until clean. Confirm the\ndiff carries no credentials, personal data, proprietary third-party code, or\nlicense-incompatible generated material. Propose a pull-request title and\nbody describing the change, why it is needed, how it was tested, and any\nfollow-up work to the human, and only if they approve, push and create the\npull request with `gh` CLI.\n",
+      "parent_plan_id": null,
+      "parent_version": null,
+      "status": "published"
+    },
+    "name": "repository_feature_development",
+    "description": "Plan, implement, review, verify, and publish an approved Rust repository feature.",
+    "inputs": [
+      {
+        "name": "feature_request",
+        "description": "The feature to implement.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "acceptance_expectations",
+        "description": "The expected behavior and acceptance criteria.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "branch_name",
+        "description": "The feature branch to create and publish.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "root_directory",
+        "description": "The root directory of the repository.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "directory_path"
+      }
+    ],
+    "config": {
+      "base_branch": "main",
+      "verification_attempts": "4"
+    },
+    "steps": [
+      {
+        "id": "capture_worktree_diff",
+        "name": "Capture complete reviewable diff",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst fs = require('fs');\nfunction run(args) {\n  const result = cp.spawnSync('git', args, { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });\n  if (result.error || result.status !== 0) throw new Error((result.stderr || '') + (result.error ? String(result.error) : ''));\n  return result.stdout;\n}\nlet bundle = run(['diff', '--no-ext-diff', '--binary', 'HEAD', '--']);\nconst untracked = run(['ls-files', '--others', '--exclude-standard', '-z']).split('\\0').filter(Boolean);\nfor (const path of untracked) {\n  const stat = fs.statSync(path);\n  bundle += '\\n\\n=== UNTRACKED FILE: ' + path + ' (' + stat.size + ' bytes) ===\\n';\n  if (stat.size > 524288) {\n    bundle += '[UNREVIEWABLE_OVERSIZE_FILE]\\n';\n    continue;\n  }\n  const data = fs.readFileSync(path);\n  if (data.includes(0)) bundle += '[UNREVIEWABLE_BINARY_FILE]\\n';\n  else bundle += data.toString('utf8');\n}\nprocess.stdout.write(JSON.stringify(bundle));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 180
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "diff_bundle",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "confirm_agent_requirements",
+        "name": "Confirm experimental agent requirements",
+        "description": "Require the experimental agent-steps setting and an authenticated Codex or Claude Code account before any repository changes.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Confirm that the experimental agent-steps setting is enabled and that an authenticated Codex or Claude Code account is selected. Reject this approval to abort if either requirement is missing.",
+          "response_field": "requirements_approved",
+          "approval_required": true
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "requirements_approved",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verify_clippy",
+        "name": "Run Clippy with warnings denied",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst result = cp.spawnSync('cargo', ['clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });\nprocess.stdout.write(JSON.stringify({ success: !result.error && result.status === 0, exit_code: result.status === null ? -1 : result.status, stdout: (result.stdout || '').slice(-20000), stderr: ((result.stderr || '') + (result.error ? String(result.error) : '')).slice(-20000) }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verify_fmt",
+        "name": "Check Rust formatting",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst result = cp.spawnSync('cargo', ['fmt', '--check'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });\nprocess.stdout.write(JSON.stringify({ success: !result.error && result.status === 0, exit_code: result.status === null ? -1 : result.status, stdout: (result.stdout || '').slice(-20000), stderr: ((result.stderr || '') + (result.error ? String(result.error) : '')).slice(-20000) }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 600
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verify_live_spec",
+        "name": "Run ignored live-spec planning tests",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst result = cp.spawnSync('cargo', ['test', '--test', 'live_spec_planning', '--', '--ignored'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });\nprocess.stdout.write(JSON.stringify({ success: !result.error && result.status === 0, exit_code: result.status === null ? -1 : result.status, stdout: (result.stdout || '').slice(-20000), stderr: ((result.stderr || '') + (result.error ? String(result.error) : '')).slice(-20000) }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 2400
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verify_tests",
+        "name": "Run all Rust targets and features",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst result = cp.spawnSync('cargo', ['test', '--all-targets', '--all-features'], { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });\nprocess.stdout.write(JSON.stringify({ success: !result.error && result.status === 0, exit_code: result.status === null ? -1 : result.status, stdout: (result.stdout || '').slice(-20000), stderr: ((result.stderr || '') + (result.error ? String(result.error) : '')).slice(-20000) }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 2400
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "prepare_feature_branch",
+        "name": "Clean-update repository and create feature branch",
+        "description": "Abort on tracked or untracked changes, update main with fast-forward-only semantics, and create the requested branch.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "bash",
+          "inline": "set -euo pipefail\nif ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then\n  echo 'The selected directory is not a Git repository.' >&2\n  exit 1\nfi\nif [ -n \"$(git status --porcelain=v1 --untracked-files=all)\" ]; then\n  echo 'Checkout is not clean; aborting before changing branches.' >&2\n  exit 1\nfi\ngit check-ref-format --branch \"$BRANCH\" >/dev/null\nif [ \"$BRANCH\" = \"$BASE_BRANCH\" ]; then\n  echo 'The feature branch must differ from the base branch.' >&2\n  exit 1\nfi\ngit switch \"$BASE_BRANCH\"\ngit pull --ff-only --no-rebase\nif [ -n \"$(git status --porcelain=v1 --untracked-files=all)\" ]; then\n  echo 'Checkout became dirty while updating the base branch; aborting.' >&2\n  exit 1\nfi\ngit switch --create \"$BRANCH\"\nprintf 'Created clean feature branch %s from updated %s.\\n' \"$BRANCH\" \"$BASE_BRANCH\"",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "BASE_BRANCH": "${conf.base_branch}",
+            "BRANCH": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 300
+        },
+        "depends_on": [
+          "confirm_agent_requirements"
+        ],
+        "outputs": [
+          {
+            "name": "branch_receipt",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "review_diff_compliance",
+        "name": "Review diff for prohibited material",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "You are a strict source-change compliance reviewer. Determine whether the supplied complete worktree diff contains credentials or secrets, personal data, proprietary third-party code, license-incompatible generated material, or any unreviewable oversized/binary file marker. Return only strict JSON in this shape: {\"passed\":true,\"findings\":[]}. Set passed false and provide concise actionable findings whenever prohibited or unreviewable material exists. Do not use Markdown.",
+          "user_prompt": "Review this worktree diff:\n\n${step.capture_worktree_diff.diff_bundle}",
+          "output_field": "compliance_json",
+          "max_tokens": 1500,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "capture_worktree_diff"
+        ],
+        "outputs": [
+          {
+            "name": "compliance_json",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "inspect_repository",
+        "name": "Inspect workspace ownership",
+        "description": "Collect deterministic workspace, package, and source-file information for package planning.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nfunction run(command, args) {\n  const result = cp.spawnSync(command, args, { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 });\n  if (result.error || result.status !== 0) {\n    process.stderr.write((result.stderr || '') + (result.error ? String(result.error) : ''));\n    process.exit(result.status === null ? 1 : result.status);\n  }\n  return result.stdout;\n}\nconst metadata = JSON.parse(run('cargo', ['metadata', '--no-deps', '--format-version', '1']));\nconst files = run('git', ['ls-files']).split('\\n').filter(Boolean).filter((path) => /(^|\\/)(Cargo\\.toml|src\\/|tests\\/|skills\\/)/.test(path)).slice(0, 5000);\nconst inventory = {\n  workspace_root: metadata.workspace_root,\n  workspace_members: metadata.workspace_members,\n  packages: metadata.packages.map((pkg) => ({ name: pkg.name, manifest_path: pkg.manifest_path, targets: pkg.targets.map((target) => ({ name: target.name, kind: target.kind, src_path: target.src_path })) })),\n  relevant_files: files\n};\nprocess.stdout.write(JSON.stringify(inventory));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 180
+        },
+        "depends_on": [
+          "prepare_feature_branch"
+        ],
+        "outputs": [
+          {
+            "name": "inventory",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "parse_compliance",
+        "name": "Validate compliance result",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst raw = fs.readFileSync(0, 'utf8');\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n  if (typeof parsed.passed !== 'boolean' || !Array.isArray(parsed.findings)) throw new Error('invalid compliance shape');\n  process.stdout.write(JSON.stringify({ passed: parsed.passed, compliance_evidence: { findings: parsed.findings } }));\n} catch (error) {\n  process.stdout.write(JSON.stringify({ passed: false, compliance_evidence: { findings: ['Compliance response was invalid JSON: ' + String(error)] } }));\n}",
+          "file": null,
+          "args": [],
+          "stdin": "${step.review_diff_compliance.compliance_json}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "review_diff_compliance"
+        ],
+        "outputs": [
+          {
+            "name": "passed",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "compliance_evidence",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "aggregate_verification",
+        "name": "Aggregate deterministic checks",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst input = JSON.parse(fs.readFileSync(0, 'utf8'));\nconst checks = { fmt: input.fmt, clippy: input.clippy, tests: input.tests, live_spec_planning: input.live_spec_planning };\nconst failures = {};\nfor (const [name, status] of Object.entries(checks)) {\n  if (!status || status.success !== true) failures[name] = status || { success: false, stderr: 'Missing status' };\n}\nif (input.compliance_passed !== true) failures.compliance = input.compliance_evidence;\nprocess.stdout.write(JSON.stringify({ all_passed: Object.keys(failures).length === 0, evidence: { attempt: input.attempt, failures } }));",
+          "file": null,
+          "args": [],
+          "stdin": "{\"attempt\":${item.attempt},\"fmt\":${step.verify_fmt.status},\"clippy\":${step.verify_clippy.status},\"tests\":${step.verify_tests.status},\"live_spec_planning\":${step.verify_live_spec.status},\"compliance_passed\":${step.parse_compliance.passed},\"compliance_evidence\":${step.parse_compliance.compliance_evidence}}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "parse_compliance",
+          "verify_clippy",
+          "verify_fmt",
+          "verify_live_spec",
+          "verify_tests"
+        ],
+        "outputs": [
+          {
+            "name": "all_passed",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "evidence",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "propose_package_plan",
+        "name": "Propose module-owned package plan",
+        "description": "Map the request to clean ownership boundaries and concurrency groups.",
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "You are a senior Rust repository planner. Produce a concise implementation package plan without writing code. Respect existing module and crate ownership, keep cross-module contracts explicit, and identify only genuinely independent packages as concurrent work. Include affected modules, package boundaries, dependencies, integration order, acceptance mapping, focused regression tests, risks, and review checkpoints.",
+          "user_prompt": "Feature request:\n${input.feature_request}\n\nAcceptance expectations:\n${input.acceptance_expectations}\n\nRepository inventory:\n${step.inspect_repository.inventory}\n\nPropose the module-owned implementation package plan for human review.",
+          "output_field": "package_plan",
+          "max_tokens": 3000,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "inspect_repository"
+        ],
+        "outputs": [
+          {
+            "name": "package_plan",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "collect_plan_feedback_one",
+        "name": "Review initial package plan",
+        "description": "Collect the first round of human feedback.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Review this proposed package plan:\n\n${step.propose_package_plan.package_plan}\n\nEnter requested revisions, or enter APPROVE if no changes are needed.",
+          "response_field": "feedback_one",
+          "approval_required": false
+        },
+        "depends_on": [
+          "propose_package_plan"
+        ],
+        "outputs": [
+          {
+            "name": "feedback_one",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verification_condition",
+        "name": "Decide whether repairs are required",
+        "description": null,
+        "config": {
+          "type": "CONDITION",
+          "expression": "${step.aggregate_verification.all_passed} == true",
+          "true_steps": [],
+          "false_steps": [
+            "repair_findings"
+          ]
+        },
+        "depends_on": [
+          "aggregate_verification"
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "repair_findings",
+        "name": "Repair captured findings",
+        "description": "Edit only from the current attempt's captured evidence; the next attempt verifies the repair.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Repair the current verification and compliance findings in the repository without expanding the approved feature scope.\n\nApproved package plan:\n${step.revise_package_plan_two.final_package_plan}\n\nCurrent attempt evidence:\n${step.aggregate_verification.evidence}\n\nInspect the affected files, read skills/principal-developer/SKILL.md completely, and make the smallest ownership-respecting fixes required by this evidence. Do not rerun cargo checks or compliance checks yourself; the next deterministic FAN_OUT iteration performs acceptance. Do not commit, push, create a pull request, invoke another Codex or Claude CLI, or modify unrelated modules.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [
+          "verification_condition"
+        ],
+        "outputs": [
+          {
+            "name": "repair_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "revise_package_plan_one",
+        "name": "Apply first planning feedback",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "Revise an implementation package plan using human feedback. Preserve the plan unchanged when the feedback is exactly APPROVE. Keep package ownership clean, prevent cross-module pollution, and distinguish concurrent work from ordered integration.",
+          "user_prompt": "Current plan:\n${step.propose_package_plan.package_plan}\n\nHuman feedback:\n${step.collect_plan_feedback_one.feedback_one}\n\nReturn the complete revised plan.",
+          "output_field": "revised_plan_one",
+          "max_tokens": 3000,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "collect_plan_feedback_one"
+        ],
+        "outputs": [
+          {
+            "name": "revised_plan_one",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "collect_plan_feedback_two",
+        "name": "Review revised package plan",
+        "description": "Collect another round of human feedback before final approval.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Review the revised package plan:\n\n${step.revise_package_plan_one.revised_plan_one}\n\nEnter any remaining revisions, or enter APPROVE if it is ready for final approval.",
+          "response_field": "feedback_two",
+          "approval_required": false
+        },
+        "depends_on": [
+          "revise_package_plan_one"
+        ],
+        "outputs": [
+          {
+            "name": "feedback_two",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "revise_package_plan_two",
+        "name": "Apply final planning feedback",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "Produce the final complete implementation package plan from the current plan and human feedback. Preserve the current plan unchanged when the feedback is exactly APPROVE. Keep ownership boundaries, concurrency groups, integration order, acceptance mapping, regression coverage, risks, and review gates explicit.",
+          "user_prompt": "Current plan:\n${step.revise_package_plan_one.revised_plan_one}\n\nHuman feedback:\n${step.collect_plan_feedback_two.feedback_two}",
+          "output_field": "final_package_plan",
+          "max_tokens": 3000,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "collect_plan_feedback_two"
+        ],
+        "outputs": [
+          {
+            "name": "final_package_plan",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "approve_package_plan",
+        "name": "Approve final package plan",
+        "description": "No implementation agent runs until the human explicitly approves.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Explicitly approve this final package plan to begin implementation, or reject to terminate the run:\n\n${step.revise_package_plan_two.final_package_plan}",
+          "response_field": "package_plan_approved",
+          "approval_required": true
+        },
+        "depends_on": [
+          "revise_package_plan_two"
+        ],
+        "outputs": [
+          {
+            "name": "package_plan_approved",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "implement_feature",
+        "name": "Implement and integrate approved packages",
+        "description": "Use the selected coding agent to implement the approved package plan and apply the principal-developer review gate.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Implement the requested feature in this repository according to the explicitly approved package plan below.\n\nFeature request:\n${input.feature_request}\n\nAcceptance expectations:\n${input.acceptance_expectations}\n\nApproved package plan:\n${step.revise_package_plan_two.final_package_plan}\n\nDistribute independent packages concurrently across their owning modules when the configured coding agent supports parallel sub-work, while enforcing the approved ownership boundaries and preventing cross-module pollution. Integrate all package results into one coherent worktree. Add the smallest focused regression coverage required by the acceptance expectations. Then read skills/principal-developer/SKILL.md completely and apply it as a review gate, correcting review findings within the approved scope. Leave final acceptance to the typed verification steps that follow. Do not commit, push, create a pull request, modify the approved scope, or invoke another Codex or Claude CLI.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 3600
+        },
+        "depends_on": [
+          "approve_package_plan"
+        ],
+        "outputs": [
+          {
+            "name": "implementation_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "create_attempt_list",
+        "name": "Create bounded verification attempts",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const count = Number(process.env.ATTEMPTS);\nif (!Number.isInteger(count) || count < 1 || count > 10) process.exit(1);\nprocess.stdout.write(JSON.stringify(Array.from({ length: count }, (_, index) => index + 1)));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "ATTEMPTS": "${conf.verification_attempts}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "implement_feature"
+        ],
+        "outputs": [
+          {
+            "name": "attempts",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "verification_retries",
+        "name": "Verify and repair until clean",
+        "description": null,
+        "config": {
+          "type": "FAN_OUT",
+          "over": "create_attempt_list.attempts",
+          "item_var": "attempt",
+          "spawn_steps": [
+            "verify_fmt",
+            "verify_clippy",
+            "verify_tests",
+            "verify_live_spec",
+            "capture_worktree_diff",
+            "review_diff_compliance",
+            "parse_compliance",
+            "aggregate_verification",
+            "verification_condition",
+            "repair_findings"
+          ],
+          "until": "${step.aggregate_verification.all_passed} == true"
+        },
+        "depends_on": [
+          "create_attempt_list"
+        ],
+        "outputs": [
+          {
+            "name": "results",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "commit_verified_changes",
+        "name": "Commit verified changes",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "bash",
+          "inline": "set -euo pipefail\nCURRENT_BRANCH=\"$(git branch --show-current)\"\nif [ \"$CURRENT_BRANCH\" != \"$BRANCH\" ]; then\n  echo 'Current branch no longer matches the requested feature branch.' >&2\n  exit 1\nfi\ngit add --all\nif git diff --cached --quiet; then\n  echo 'No feature changes are available to commit.' >&2\n  exit 1\nfi\ngit commit -m 'feat: implement approved feature'\ngit rev-parse HEAD",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "BRANCH": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 300
+        },
+        "depends_on": [
+          "verification_retries"
+        ],
+        "outputs": [
+          {
+            "name": "commit_sha",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "collect_pr_context",
+        "name": "Collect pull-request context",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nfunction run(args) {\n  const result = cp.spawnSync('git', args, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });\n  if (result.error || result.status !== 0) throw new Error((result.stderr || '') + (result.error ? String(result.error) : ''));\n  return result.stdout.trim();\n}\nprocess.stdout.write(JSON.stringify({ commit: run(['rev-parse', 'HEAD']), commits: run(['log', '--oneline', 'main..HEAD']), diff_stat: run(['diff', '--stat', 'main...HEAD']), changed_files: run(['diff', '--name-status', 'main...HEAD']) }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 60
+        },
+        "depends_on": [
+          "commit_verified_changes"
+        ],
+        "outputs": [
+          {
+            "name": "pr_context",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "draft_pull_request",
+        "name": "Draft pull-request title and body",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "Draft a concise pull request. Return only strict JSON with string fields title and body. The body must explain what changed, why it is needed, how it was tested, compliance review status, and any follow-up work. Use Markdown inside the body string, but no Markdown fence around the JSON.",
+          "user_prompt": "Feature request:\n${input.feature_request}\n\nAcceptance expectations:\n${input.acceptance_expectations}\n\nApproved package plan:\n${step.revise_package_plan_two.final_package_plan}\n\nGit context:\n${step.collect_pr_context.pr_context}\n\nAll of these checks passed: cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test --all-targets --all-features; cargo test --test live_spec_planning -- --ignored. The complete diff compliance review also passed.",
+          "output_field": "pr_draft",
+          "max_tokens": 1800,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "collect_pr_context"
+        ],
+        "outputs": [
+          {
+            "name": "pr_draft",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "parse_pull_request",
+        "name": "Validate pull-request draft",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst draft = JSON.parse(fs.readFileSync(0, 'utf8'));\nif (typeof draft.title !== 'string' || !draft.title.trim() || typeof draft.body !== 'string' || !draft.body.trim()) throw new Error('Invalid pull-request draft');\nprocess.stdout.write(JSON.stringify({ title: draft.title.trim(), body: draft.body.trim() }));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.draft_pull_request.pr_draft}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "draft_pull_request"
+        ],
+        "outputs": [
+          {
+            "name": "title",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "body",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "approve_pull_request",
+        "name": "Approve pull-request publication",
+        "description": "Require explicit approval before pushing or creating the pull request.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Approve pushing the branch and creating this pull request with gh CLI, or reject to terminate without publication.\n\nTitle:\n${step.parse_pull_request.title}\n\nBody:\n${step.parse_pull_request.body}",
+          "response_field": "publication_approved",
+          "approval_required": true
+        },
+        "depends_on": [
+          "parse_pull_request"
+        ],
+        "outputs": [
+          {
+            "name": "publication_approved",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      },
+      {
+        "id": "publish_pull_request",
+        "name": "Push branch and create pull request",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const cp = require('child_process');\nconst fs = require('fs');\nconst draft = JSON.parse(fs.readFileSync(0, 'utf8'));\nconst branch = process.env.BRANCH;\nfunction run(command, args, allowFailure) {\n  const result = cp.spawnSync(command, args, { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });\n  if (!allowFailure && (result.error || result.status !== 0)) {\n    process.stderr.write((result.stderr || '') + (result.error ? String(result.error) : ''));\n    process.exit(result.status === null ? 1 : result.status);\n  }\n  return result;\n}\nconst current = run('git', ['branch', '--show-current'], false).stdout.trim();\nif (current !== branch) throw new Error('Current branch does not match requested branch');\nrun('git', ['push', '--set-upstream', 'origin', branch], false);\nlet view = run('gh', ['pr', 'view', branch, '--json', 'url', '--jq', '.url'], true);\nif (view.status === 0 && view.stdout.trim()) {\n  process.stdout.write(view.stdout.trim());\n  process.exit(0);\n}\nconst created = run('gh', ['pr', 'create', '--base', 'main', '--head', branch, '--title', draft.title, '--body', draft.body], false);\nprocess.stdout.write(created.stdout.trim());",
+          "file": null,
+          "args": [],
+          "stdin": "${step.draft_pull_request.pr_draft}",
+          "env": {
+            "BRANCH": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 600
+        },
+        "depends_on": [
+          "approve_pull_request"
+        ],
+        "outputs": [
+          {
+            "name": "pr_url",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": null,
+        "retry": null
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pull_request_url",
+        "description": "The URL of the approved and created pull request.",
+        "source": "${step.publish_pull_request.pr_url}"
+      }
+    ]
+  },
+  "tools": []
+}

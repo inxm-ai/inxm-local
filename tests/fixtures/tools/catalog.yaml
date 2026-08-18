@@ -1,0 +1,18 @@
+tools:
+  - name: echo
+    description: Echo a message to stdout
+    config:
+      kind: subprocess
+      command: echo
+    input_schema:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+    output_schema:
+      type: object
+      properties:
+        stdout:
+          type: string
+    allowlisted: true

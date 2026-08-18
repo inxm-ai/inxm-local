@@ -1,0 +1,114 @@
+[package]
+name = "inxm-local"
+version = "0.1.0"
+edition = "2024"
+description = "Local-first compiled-AI workflow desktop app — chat to compile plans, run them deterministically, manage MCP tools"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "inxm-local"
+path = "src/main.rs"
+
+[dependencies]
+# Desktop UI — pure-Rust immediate-mode GUI (no system webview required)
+eframe = "0.32"
+egui = "0.32"
+
+# Serialisation — on every type that crosses a boundary
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Error handling — thiserror for domain errors, anyhow for top-level aggregation
+thiserror = "2"
+anyhow = "1"
+
+# Async runtime (engine thread; the UI thread stays sync)
+tokio = { version = "1", features = ["full"] }
+
+# Local HTTP MCP server
+axum = "0.8"
+
+# Outgoing HTTP (compiler backends, HTTP tools; "blocking" only for the
+# fire-and-forget telemetry thread)
+reqwest = { version = "0.12", features = ["json", "blocking"] }
+
+# Official MCP client SDK (outbound Streamable HTTP + OAuth only; the existing
+# hand-written stdio client and inbound localhost server remain unchanged).
+# rmcp vendors its own reqwest (a different major version from the one above,
+# so features do not unify) and needs an explicit TLS-backend feature or its
+# HTTPS requests fail at connect time with "invalid URL, scheme is not http".
+# "reqwest-tls-no-provider" pulls the TLS plumbing without a bundled crypto
+# provider crate — this reuses the `ring` provider already in the dependency
+# tree (see the `rustls` entry below) instead of adding a second one
+# (aws-lc-rs), which rustls does not allow without an explicit process-wide
+# choice.
+rmcp = { version = "3", default-features = false, features = ["client", "auth", "transport-streamable-http-client-reqwest", "reqwest-tls-no-provider"] }
+
+# Installs the process-wide default crypto provider rmcp's TLS backend needs
+# (see above) — `ring`, not rustls's own default (`aws-lc-rs`), to match what
+# the rest of the dependency tree already uses.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+
+# Cross-platform OS credential-vault interface. Secrets never fall back to files.
+keyring = { version = "4", default-features = false, features = ["v1"] }
+
+# Observability — tracing crate, console subscriber
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+# DAG scheduling
+petgraph = "0.6"
+
+# Stable IDs
+uuid = { version = "1", features = ["v4"] }
+
+# Timestamps with serde support
+chrono = { version = "0.4", features = ["serde"] }
+
+# Placeholder regex
+regex = "1"
+
+# Ordered maps for stable plan diffs
+indexmap = { version = "2", features = ["serde"] }
+
+# Platform directories (data dir default)
+directories = "5"
+
+# Shell-style argument splitting for the chat command parser
+shlex = "1"
+
+# Cron expression parsing for scheduled plan runs
+cron = "0.12"
+
+# Native file open/save dialogs for plan export/import
+rfd = "0.15"
+
+# Close-to-tray support (GTK/appindicator on Linux)
+tray-icon = { version = "0.24.1", default-features = false, features = ["gtk"] }
+
+# Single-instance guard (named pipe on Windows, Unix domain socket elsewhere)
+interprocess = "2"
+
+[build-dependencies]
+winresource = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 2
+
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+gtk = "0.18"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_UI_WindowsAndMessaging"] }
+
+# Raw HWND access so the tray's "Open" action can restore the main window
+# directly via Win32 calls, bypassing egui/winit's viewport-command queue
+# (which never gets flushed for a window that is currently hidden — see
+# `src/app/tray.rs`).
+raw-window-handle = "0.6"

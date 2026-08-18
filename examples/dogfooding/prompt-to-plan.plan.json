@@ -1,0 +1,985 @@
+{
+  "format_version": 1,
+  "exported_at": "2026-08-18T17:43:04.997785649Z",
+  "app_version": "0.1.0",
+  "plan": {
+    "metadata": {
+      "id": "ba32489b-71de-456a-9bed-08f3ae033a48",
+      "version": 1,
+      "created_at": "2026-08-18T17:43:04.948749273Z",
+      "updated_at": "2026-08-18T17:43:04.948749273Z",
+      "compiled_by": "codex:",
+      "intent": "Build a reusable development workflow for this repository. Accept a plan\nprompt, explicit expectations for the generated plan, a branch name, and the\nrepository root directory. Abort unless the checkout is clean, switch to main,\npull the latest changes with a fast-forward-only pull and stop without changing\nthe worktree if that fails, then create the requested branch.\n\nStart this application's local MCP server and exercise the supplied plan prompt\nend to end through the MCP `compile_plan` and `show_plan` tools.\nDeterministically compare the generated plan with every supplied expectation.\nIf it already matches, ask the human which real-world behavior still fails and\nuse that feedback as an additional expectation.\n\nDiagnose why compilation diverges and add a focused ignored\n`live_spec_planning` regression test before changing implementation. Ask the\nhuman to approve starting agent-driven remediation, stating the diagnosis and\nthe regression test as evidence; only after approval, use Codex or Claude\nCode to fix the compiler and rerun the focused live test until all\nexpectations pass, with a bounded iteration limit and preserved failure\nevidence. This AGENT_CALL requires the experimental agent-steps setting to be\nenabled and an authenticated Codex or Claude Code account selected; abort\nwith that requirement if it is not.\n\nApply the `principal-developer` skill (`skills/principal-developer/SKILL.md`)\nas a review gate, then run `cargo fmt --check`, `cargo clippy --all-targets\n--all-features -- -D warnings`, `cargo test --all-targets --all-features`,\nand all ignored `live_spec_planning` tests, fixing findings and repeating the\nrelevant checks until clean. Confirm the diff carries no credentials,\npersonal data, proprietary third-party code, or license-incompatible\ngenerated material. Prepare a pull-request title and body describing the\nchange, why it is needed, how it was tested, and any follow-up work, ask the\nhuman to approve publication, and only after approval push and create the\npull request with `gh` CLI.\n",
+      "parent_plan_id": null,
+      "parent_version": null,
+      "status": "published"
+    },
+    "name": "repair_plan_compiler_from_live_spec",
+    "description": "Exercise plan compilation through the local MCP server, capture a focused regression, remediate with bounded agent-driven retries, apply the principal-developer review gate, and publish an approved pull request.",
+    "inputs": [
+      {
+        "name": "plan_prompt",
+        "description": "Natural-language prompt to compile through the local MCP compile_plan and show_plan tools.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "expectations",
+        "description": "JSON array of exact assertions. Each item must contain a JSON Pointer in `pointer` and the expected value in `expected`.",
+        "value_type": "array",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "branch_name",
+        "description": "Feature branch to create from the updated main branch.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "value"
+      },
+      {
+        "name": "root_directory",
+        "description": "Root directory of the repository.",
+        "value_type": "string",
+        "required": true,
+        "default": null,
+        "input_kind": "directory_path"
+      }
+    ],
+    "config": {
+      "base_branch": "main",
+      "final_retry_limit": 3,
+      "focused_retry_limit": 3,
+      "remote": "origin",
+      "review_skill_path": "skills/principal-developer/SKILL.md"
+    },
+    "steps": [
+      {
+        "id": "check_all_tests",
+        "name": "Run all cargo tests",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst result = spawnSync('cargo', ['test', '--all-targets', '--all-features'], { encoding: 'utf8' });\nconst exitCode = typeof result.status === 'number' ? result.status : 1;\nprocess.stdout.write(JSON.stringify({ success: exitCode === 0, exit_code: exitCode, stdout: result.stdout || '', stderr: (result.stderr || '') + (result.error ? String(result.error) : '') }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 3600
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 3600,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "check_clippy",
+        "name": "Run cargo clippy",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst result = spawnSync('cargo', ['clippy', '--all-targets', '--all-features', '--', '-D', 'warnings'], { encoding: 'utf8' });\nconst exitCode = typeof result.status === 'number' ? result.status : 1;\nprocess.stdout.write(JSON.stringify({ success: exitCode === 0, exit_code: exitCode, stdout: result.stdout || '', stderr: (result.stderr || '') + (result.error ? String(result.error) : '') }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 1800,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "check_format",
+        "name": "Run cargo fmt check",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst result = spawnSync('cargo', ['fmt', '--check'], { encoding: 'utf8' });\nconst exitCode = typeof result.status === 'number' ? result.status : 1;\nprocess.stdout.write(JSON.stringify({ success: exitCode === 0, exit_code: exitCode, stdout: result.stdout || '', stderr: (result.stderr || '') + (result.error ? String(result.error) : '') }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "check_ignored_live_specs",
+        "name": "Run all ignored live planning tests",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst result = spawnSync('cargo', ['test', '--test', 'live_spec_planning', '--', '--ignored'], { encoding: 'utf8' });\nconst exitCode = typeof result.status === 'number' ? result.status : 1;\nprocess.stdout.write(JSON.stringify({ success: exitCode === 0, exit_code: exitCode, stdout: result.stdout || '', stderr: (result.stderr || '') + (result.error ? String(result.error) : '') }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 3600
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 3600,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "focused_live_test",
+        "name": "Run focused ignored live regression",
+        "description": "Run only the newly added ignored live_spec_planning regression and capture failures for repair.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst filter = process.env.TEST_FILTER;\nconst result = spawnSync('cargo', ['test', '--test', 'live_spec_planning', filter, '--', '--ignored'], { encoding: 'utf8' });\nconst exitCode = typeof result.status === 'number' ? result.status : 1;\nprocess.stdout.write(JSON.stringify({ success: exitCode === 0, exit_code: exitCode, stdout: result.stdout || '', stderr: (result.stderr || '') + (result.error ? String(result.error) : '') }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "TEST_FILTER": "${step.diagnose_and_add_regression.regression_test_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "prepare_checkout",
+        "name": "Prepare clean feature branch",
+        "description": "Require a clean checkout, switch to main, update it with a fast-forward-only pull, and create the requested branch.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "bash",
+          "inline": "set -euo pipefail\nstatus=\"$(git status --porcelain=v1 --untracked-files=all)\"\nif [ -n \"$status\" ]; then\n  echo \"Checkout is not clean; tracked or untracked changes were found.\" >&2\n  exit 1\nfi\ngit check-ref-format --branch \"$TARGET_BRANCH\" >/dev/null\ngit switch \"$BASE_BRANCH\"\nif ! git pull --ff-only \"$REMOTE_NAME\" \"$BASE_BRANCH\"; then\n  echo \"Fast-forward-only pull failed. No feature branch was created.\" >&2\n  exit 1\nfi\ngit switch -c \"$TARGET_BRANCH\"\nprintf 'Created branch %s from updated %s/%s\\n' \"$TARGET_BRANCH\" \"$REMOTE_NAME\" \"$BASE_BRANCH\"",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {
+            "BASE_BRANCH": "${conf.base_branch}",
+            "REMOTE_NAME": "${conf.remote}",
+            "TARGET_BRANCH": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 180
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "receipt",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 180,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "principal_review",
+        "name": "Apply principal-developer review gate",
+        "description": "Review the complete diff against the repository skill and material-safety requirements.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Act only as a reviewer. Read ${conf.review_skill_path} completely and apply it as a blocking review gate to the current diff. Inspect tracked and untracked changes. Confirm whether the diff contains credentials, personal data, proprietary third-party code, or license-incompatible generated material. Do not edit files and do not run the cargo acceptance commands, which are separate typed checks. Return only a JSON object with boolean keys passed and safety_passed, an array findings, and a string summary. passed must be false for every blocking skill violation; safety_passed must be false if any prohibited material is present or cannot be responsibly confirmed absent.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "review_result",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "scan_diff_for_sensitive_material",
+        "name": "Scan changed material for sensitive data",
+        "description": "Perform a deterministic first-pass scan of tracked and untracked changed text.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst { spawnSync } = require('child_process');\nconst runGit = (args) => spawnSync('git', args, { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });\nconst diffResult = runGit(['diff', '--no-ext-diff', '--unified=0', '--']);\nconst filesResult = runGit(['ls-files', '--others', '--exclude-standard', '-z']);\nif (diffResult.status !== 0 || filesResult.status !== 0) {\n  process.stdout.write(JSON.stringify({ success: false, exit_code: 1, findings: ['Unable to inspect the complete diff.'], stdout: diffResult.stdout || '', stderr: (diffResult.stderr || '') + (filesResult.stderr || '') }));\n  process.exit(0);\n}\nlet content = diffResult.stdout || '';\nfor (const file of (filesResult.stdout || '').split('\\0').filter(Boolean)) {\n  try {\n    const stat = fs.statSync(file);\n    if (stat.isFile() && stat.size <= 2 * 1024 * 1024) content += '\\n' + fs.readFileSync(file, 'utf8');\n  } catch (_) {\n  }\n}\nconst patterns = [\n  ['private key', /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/],\n  ['AWS access key', /AKIA[0-9A-Z]{16}/],\n  ['GitHub token', /gh[opusr]_[A-Za-z0-9_]{30,}/],\n  ['OpenAI key', /sk-[A-Za-z0-9_-]{20,}/],\n  ['assigned secret value', /(?:client_secret|access_token|refresh_token|api_key|password)\\s*[:=]\\s*[\"'][^\"'\\s]{8,}[\"']/i],\n  ['email address or personal-data candidate', /\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b/i]\n];\nconst findings = patterns.filter((entry) => entry[1].test(content)).map((entry) => entry[0]);\nprocess.stdout.write(JSON.stringify({ success: findings.length === 0, exit_code: findings.length === 0 ? 0 : 1, findings, stdout: '', stderr: '' }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 120
+        },
+        "depends_on": [],
+        "outputs": [
+          {
+            "name": "status",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 120,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "aggregate_final_checks",
+        "name": "Aggregate review and validation evidence",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst evidence = JSON.parse(fs.readFileSync(0, 'utf8'));\nconst statuses = [evidence.format, evidence.clippy, evidence.tests, evidence.live_specs, evidence.sensitive_scan];\nconst allPassed = evidence.review.passed === true && evidence.review.safety_passed === true && statuses.every((status) => status.success === true && status.exit_code === 0);\nprocess.stdout.write(JSON.stringify({ all_passed: allPassed, evidence }));",
+          "file": null,
+          "args": [],
+          "stdin": "{\"review\":${step.principal_review.review_result},\"format\":${step.check_format.status},\"clippy\":${step.check_clippy.status},\"tests\":${step.check_all_tests.status},\"live_specs\":${step.check_ignored_live_specs.status},\"sensitive_scan\":${step.scan_diff_for_sensitive_material.status}}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 60
+        },
+        "depends_on": [
+          "check_all_tests",
+          "check_clippy",
+          "check_format",
+          "check_ignored_live_specs",
+          "principal_review",
+          "scan_diff_for_sensitive_material"
+        ],
+        "outputs": [
+          {
+            "name": "all_passed",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "evidence",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 60,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "aggregate_focused_result",
+        "name": "Aggregate focused test result",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst status = JSON.parse(fs.readFileSync(0, 'utf8'));\nprocess.stdout.write(JSON.stringify({ all_passed: status.success === true && status.exit_code === 0, evidence: status }));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.focused_live_test.status}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "focused_live_test"
+        ],
+        "outputs": [
+          {
+            "name": "all_passed",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "evidence",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "exercise_mcp",
+        "name": "Exercise compilation through local MCP",
+        "description": "Discover and start the repository's local MCP server, invoke compile_plan and show_plan, and stop the server afterward.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Inspect the repository to discover the documented command for starting this application's local MCP server. Start it, invoke the actual MCP compile_plan tool with this plan prompt, then invoke show_plan for the compiled plan, and stop every server process you started. Do not edit repository files. Return only one JSON object with keys generated_plan, shown_plan, invocation_evidence, and server_command. The generated_plan value must be the complete structured plan returned by compile_plan, not a prose summary. Plan prompt: ${input.plan_prompt}",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [
+          "prepare_checkout"
+        ],
+        "outputs": [
+          {
+            "name": "exercise_report",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "compare_expectations",
+        "name": "Compare every expectation",
+        "description": "Apply exact JSON Pointer assertions to the generated plan without model interpretation.",
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst payload = JSON.parse(fs.readFileSync(0, 'utf8'));\nconst expectations = payload.expectations;\nconst plan = payload.exercise.generated_plan;\nif (!Array.isArray(expectations)) {\n  process.stderr.write('expectations must be an array\\n');\n  process.exit(1);\n}\nconst decodeToken = (token) => token.replace(/~1/g, '/').replace(/~0/g, '~');\nconst readPointer = (value, pointer) => {\n  if (pointer === '') return { found: true, value };\n  if (typeof pointer !== 'string' || !pointer.startsWith('/')) return { found: false };\n  let current = value;\n  for (const rawToken of pointer.slice(1).split('/')) {\n    const token = decodeToken(rawToken);\n    if (current === null || typeof current !== 'object' || !Object.prototype.hasOwnProperty.call(current, token)) return { found: false };\n    current = current[token];\n  }\n  return { found: true, value: current };\n};\nconst equal = (left, right) => JSON.stringify(left) === JSON.stringify(right);\nconst evidence = expectations.map((expectation, index) => {\n  if (expectation === null || typeof expectation !== 'object' || typeof expectation.pointer !== 'string' || !Object.prototype.hasOwnProperty.call(expectation, 'expected')) {\n    return { index, matched: false, error: 'Expectation must contain pointer and expected fields.' };\n  }\n  const actual = readPointer(plan, expectation.pointer);\n  return {\n    index,\n    pointer: expectation.pointer,\n    expected: expectation.expected,\n    found: actual.found,\n    actual: actual.found ? actual.value : null,\n    matched: actual.found && equal(actual.value, expectation.expected)\n  };\n});\nprocess.stdout.write(JSON.stringify({ all_matched: evidence.every((item) => item.matched), evidence }));",
+          "file": null,
+          "args": [],
+          "stdin": "{\"expectations\":${input.expectations},\"exercise\":${step.exercise_mcp.exercise_report}}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 60
+        },
+        "depends_on": [
+          "exercise_mcp"
+        ],
+        "outputs": [
+          {
+            "name": "all_matched",
+            "description": null,
+            "value_type": "boolean"
+          },
+          {
+            "name": "evidence",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 60,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "decide_final_repair",
+        "name": "Decide whether final repair is needed",
+        "description": null,
+        "config": {
+          "type": "CONDITION",
+          "expression": "${step.aggregate_final_checks.all_passed} == true",
+          "true_steps": [],
+          "false_steps": [
+            "repair_final_findings"
+          ]
+        },
+        "depends_on": [
+          "aggregate_final_checks"
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "decide_focused_repair",
+        "name": "Decide whether focused repair is needed",
+        "description": null,
+        "config": {
+          "type": "CONDITION",
+          "expression": "${step.aggregate_focused_result.all_passed} == true",
+          "true_steps": [],
+          "false_steps": [
+            "repair_focused_failure"
+          ]
+        },
+        "depends_on": [
+          "aggregate_focused_result"
+        ],
+        "outputs": [
+          {
+            "name": "result",
+            "description": null,
+            "value_type": "boolean"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "collect_behavior_feedback",
+        "name": "Collect real-world failure feedback when needed",
+        "description": "When structural expectations already match, capture the real-world behavior that remains broken as an additional expectation.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Deterministic comparison result: all_matched=${step.compare_expectations.all_matched}. Evidence: ${step.compare_expectations.evidence}. If all_matched is true, describe exactly which real-world behavior still fails; that response will become an additional acceptance expectation. If all_matched is false, enter `none`.",
+          "response_field": "behavior_feedback",
+          "approval_required": false
+        },
+        "depends_on": [
+          "compare_expectations"
+        ],
+        "outputs": [
+          {
+            "name": "behavior_feedback",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 86400,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "repair_final_findings",
+        "name": "Repair review or validation findings",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Fix only the findings demonstrated by this iteration's principal-developer review, cargo checks, ignored live-spec tests, and sensitive-material scan. Preserve the requested behavior and focused regression. Remove any credentials, personal data, proprietary third-party code, or license-incompatible generated material identified by the evidence. Do not weaken tests, suppress warnings, commit, push, or create a pull request. Do not rerun checks yourself; the next deterministic iteration verifies the edits. Attempt: ${item.attempt}. Complete same-iteration evidence: ${step.aggregate_final_checks.evidence}.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 2400
+        },
+        "depends_on": [
+          "decide_final_repair"
+        ],
+        "outputs": [
+          {
+            "name": "repair_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 2400,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "repair_focused_failure",
+        "name": "Repair focused regression failure",
+        "description": null,
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Repair the compiler implementation based strictly on this iteration's captured focused-test evidence. Keep the regression focused and ignored, do not weaken or delete expectations, and do not commit, push, or create a pull request. Do not rerun the test yourself; the next deterministic iteration verifies the edit. Attempt: ${item.attempt}. Diagnosis: ${step.diagnose_and_add_regression.diagnosis}. Focused failure evidence: ${step.aggregate_focused_result.evidence}.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [
+          "decide_focused_repair"
+        ],
+        "outputs": [
+          {
+            "name": "repair_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1800,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "diagnose_and_add_regression",
+        "name": "Diagnose divergence and add focused regression",
+        "description": "Diagnose the compiler behavior and add an ignored live_spec_planning regression before production implementation changes.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Diagnose why the compiler output diverges from the supplied exact expectations. If every exact expectation matched, treat the operator's real-world failure description as an additional expectation. Before changing any production implementation, add the smallest focused ignored regression test to the live_spec_planning integration test target. The regression must compile the supplied plan prompt through the real planning path and assert every supplied expectation plus the additional behavior expectation when applicable. You may edit only test code or test fixtures in this step; do not modify production implementation. Return only a JSON object with string keys diagnosis, regression_test_name, and regression_evidence. regression_test_name must be a cargo test filter that selects only the new regression. Plan prompt: ${input.plan_prompt}. Exact expectations: ${input.expectations}. Comparison result: ${step.compare_expectations.all_matched}. Comparison evidence: ${step.compare_expectations.evidence}. Additional behavior feedback: ${step.collect_behavior_feedback.behavior_feedback}.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1200
+        },
+        "depends_on": [
+          "collect_behavior_feedback"
+        ],
+        "outputs": [
+          {
+            "name": "diagnosis",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "regression_test_name",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "regression_evidence",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1200,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "approve_agent_remediation",
+        "name": "Approve agent-driven remediation",
+        "description": "Require explicit approval before an agent changes compiler implementation.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Approve agent-driven compiler remediation? Diagnosis: ${step.diagnose_and_add_regression.diagnosis}. Focused ignored regression: ${step.diagnose_and_add_regression.regression_test_name}. Evidence: ${step.diagnose_and_add_regression.regression_evidence}. Continuing requires the experimental agent-steps setting and an authenticated Codex or Claude Code account. Reject to abort if either requirement is unavailable.",
+          "response_field": "approval",
+          "approval_required": true
+        },
+        "depends_on": [
+          "diagnose_and_add_regression"
+        ],
+        "outputs": [
+          {
+            "name": "approval",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 86400,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "implement_initial_fix",
+        "name": "Implement initial compiler fix",
+        "description": "Make the smallest production change addressing the diagnosed compiler behavior.",
+        "config": {
+          "type": "AGENT_CALL",
+          "objective": "Implement the smallest compiler change that satisfies the focused ignored regression and the supplied expectations. Preserve the regression test added before production changes. Follow repository conventions and scope changes only to this defect. Do not commit, push, create a pull request, or modify unrelated files. Leave acceptance to the typed checks that follow; do not claim success based on prose. Diagnosis: ${step.diagnose_and_add_regression.diagnosis}. Regression: ${step.diagnose_and_add_regression.regression_test_name}. Regression evidence: ${step.diagnose_and_add_regression.regression_evidence}. Exact expectations: ${input.expectations}. Additional behavior expectation: ${step.collect_behavior_feedback.behavior_feedback}.",
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 1800
+        },
+        "depends_on": [
+          "approve_agent_remediation"
+        ],
+        "outputs": [
+          {
+            "name": "implementation_report",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 1800,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "make_focused_attempts",
+        "name": "Create focused retry attempts",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "process.stdout.write(JSON.stringify([1, 2, 3]));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "implement_initial_fix"
+        ],
+        "outputs": [
+          {
+            "name": "attempts",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "retry_focused_live_test",
+        "name": "Retry focused live regression",
+        "description": null,
+        "config": {
+          "type": "FAN_OUT",
+          "over": "make_focused_attempts.attempts",
+          "item_var": "attempt",
+          "spawn_steps": [
+            "focused_live_test",
+            "aggregate_focused_result",
+            "decide_focused_repair",
+            "repair_focused_failure"
+          ],
+          "until": "${step.aggregate_focused_result.all_passed} == true"
+        },
+        "depends_on": [
+          "implement_initial_fix",
+          "make_focused_attempts"
+        ],
+        "outputs": [
+          {
+            "name": "results",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 7200,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "make_final_attempts",
+        "name": "Create final validation attempts",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "process.stdout.write(JSON.stringify([1, 2, 3]));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "retry_focused_live_test"
+        ],
+        "outputs": [
+          {
+            "name": "attempts",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "retry_final_validation",
+        "name": "Repeat review and validation until clean",
+        "description": null,
+        "config": {
+          "type": "FAN_OUT",
+          "over": "make_final_attempts.attempts",
+          "item_var": "attempt",
+          "spawn_steps": [
+            "principal_review",
+            "check_format",
+            "check_clippy",
+            "check_all_tests",
+            "check_ignored_live_specs",
+            "scan_diff_for_sensitive_material",
+            "aggregate_final_checks",
+            "decide_final_repair",
+            "repair_final_findings"
+          ],
+          "until": "${step.aggregate_final_checks.all_passed} == true"
+        },
+        "depends_on": [
+          "make_final_attempts",
+          "retry_focused_live_test"
+        ],
+        "outputs": [
+          {
+            "name": "results",
+            "description": null,
+            "value_type": "array"
+          }
+        ],
+        "timeout_secs": 21600,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "summarize_diff",
+        "name": "Summarize final diff",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const { spawnSync } = require('child_process');\nconst run = (args) => spawnSync('git', args, { encoding: 'utf8' });\nconst status = run(['status', '--short']);\nconst stat = run(['diff', '--stat']);\nconst names = run(['diff', '--name-status']);\nif (status.status !== 0 || stat.status !== 0 || names.status !== 0) process.exit(1);\nprocess.stdout.write(JSON.stringify({ status: status.stdout, stat: stat.stdout, changed_files: names.stdout }));",
+          "file": null,
+          "args": [],
+          "stdin": null,
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 120
+        },
+        "depends_on": [
+          "retry_final_validation"
+        ],
+        "outputs": [
+          {
+            "name": "diff_summary",
+            "description": null,
+            "value_type": "object"
+          }
+        ],
+        "timeout_secs": 120,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "draft_pull_request",
+        "name": "Draft pull-request title and body",
+        "description": null,
+        "config": {
+          "type": "PROMPT_CALL",
+          "model": "claude-sonnet-4-6",
+          "system_prompt": "You prepare concise engineering pull requests. Return strict JSON only, with string keys title and body. The title must use Conventional Commits style. The body must explain what changed, why it was needed, how it was tested, and any follow-up work. Do not invent facts.",
+          "user_prompt": "Prepare the pull request from this evidence.\nDiagnosis: ${step.diagnose_and_add_regression.diagnosis}\nRegression evidence: ${step.diagnose_and_add_regression.regression_evidence}\nInitial implementation: ${step.implement_initial_fix.implementation_report}\nFinal diff summary: ${step.summarize_diff.diff_summary}\nTesting completed: cargo fmt --check; cargo clippy --all-targets --all-features -- -D warnings; cargo test --all-targets --all-features; cargo test --test live_spec_planning -- --ignored. The principal-developer and sensitive-material gates passed.",
+          "output_field": "draft",
+          "max_tokens": 1200,
+          "temperature": 0.0
+        },
+        "depends_on": [
+          "summarize_diff"
+        ],
+        "outputs": [
+          {
+            "name": "draft",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 120,
+        "retry": {
+          "max_attempts": 2,
+          "delay_secs": 3,
+          "backoff": true
+        }
+      },
+      {
+        "id": "parse_pull_request_draft",
+        "name": "Validate pull-request draft",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "javascript",
+          "inline": "const fs = require('fs');\nconst value = JSON.parse(fs.readFileSync(0, 'utf8'));\nif (typeof value.title !== 'string' || value.title.trim() === '' || typeof value.body !== 'string' || value.body.trim() === '') {\n  process.stderr.write('Invalid pull-request draft\\n');\n  process.exit(1);\n}\nprocess.stdout.write(JSON.stringify({ title: value.title.trim(), body: value.body.trim() }));",
+          "file": null,
+          "args": [],
+          "stdin": "${step.draft_pull_request.draft}",
+          "env": {},
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 30
+        },
+        "depends_on": [
+          "draft_pull_request"
+        ],
+        "outputs": [
+          {
+            "name": "title",
+            "description": null,
+            "value_type": "string"
+          },
+          {
+            "name": "body",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 30,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "approve_publication",
+        "name": "Approve publication",
+        "description": "Require explicit approval before committing, pushing, and creating the pull request.",
+        "config": {
+          "type": "HUMAN_INTERACTION",
+          "prompt": "Approve publication of this pull request?\n\nTitle: ${step.parse_pull_request_draft.title}\n\nBody:\n${step.parse_pull_request_draft.body}\n\nApproval will stage and commit the reviewed diff, push branch ${input.branch_name}, and create the pull request with gh.",
+          "response_field": "approval",
+          "approval_required": true
+        },
+        "depends_on": [
+          "parse_pull_request_draft"
+        ],
+        "outputs": [
+          {
+            "name": "approval",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 86400,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      },
+      {
+        "id": "publish_pull_request",
+        "name": "Commit, push, and create pull request",
+        "description": null,
+        "config": {
+          "type": "CODE_CALL",
+          "language": "bash",
+          "inline": "set -euo pipefail\ngit add -A\ngit commit -m \"$PR_TITLE\"\ngit push -u \"$REMOTE_NAME\" \"$TARGET_BRANCH\"\ngh pr create --base \"$BASE_BRANCH\" --head \"$TARGET_BRANCH\" --title \"$PR_TITLE\" --body-file -",
+          "file": null,
+          "args": [],
+          "stdin": "${step.parse_pull_request_draft.body}",
+          "env": {
+            "BASE_BRANCH": "${conf.base_branch}",
+            "PR_TITLE": "${step.parse_pull_request_draft.title}",
+            "REMOTE_NAME": "${conf.remote}",
+            "TARGET_BRANCH": "${input.branch_name}"
+          },
+          "working_dir": "${input.root_directory}",
+          "timeout_secs": 900
+        },
+        "depends_on": [
+          "approve_publication"
+        ],
+        "outputs": [
+          {
+            "name": "pull_request_url",
+            "description": null,
+            "value_type": "string"
+          }
+        ],
+        "timeout_secs": 900,
+        "retry": {
+          "max_attempts": 1,
+          "delay_secs": 0,
+          "backoff": false
+        }
+      }
+    ],
+    "outputs": [
+      {
+        "name": "pull_request_url",
+        "description": "URL of the approved and published pull request.",
+        "source": "${step.publish_pull_request.pull_request_url}"
+      }
+    ]
+  },
+  "tools": []
+}

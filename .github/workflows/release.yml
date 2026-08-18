@@ -1,0 +1,351 @@
+name: Release
+
+# Build native installable artifacts when a GitHub Release is published. A
+# manual run builds the same artifacts without modifying a release.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (for example 0.1.0); defaults to Cargo.toml"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: inxm-local
+
+jobs:
+  build:
+    name: Package (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: x86_64-unknown-linux-gnu
+            ext: deb
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: x86_64-pc-windows-msvc-setup
+            ext: exe
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            label: x86_64-apple-darwin
+            ext: app.zip
+          - os: macos-15
+            target: aarch64-apple-darwin
+            label: aarch64-apple-darwin
+            ext: app.zip
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve build version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            RAW_VERSION="${RELEASE_TAG}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            RAW_VERSION="${INPUT_VERSION}"
+          else
+            RAW_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | sed -n '1p')"
+          fi
+
+          VERSION="${RAW_VERSION#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a release version like v0.1.0 or 0.1.0, got '${RAW_VERSION}'" >&2
+            exit 1
+          fi
+
+          echo "BUILD_VERSION=${VERSION}" >> "${GITHUB_ENV}"
+          echo "ARTIFACT_STEM=inxm-local-${{ matrix.label }}" >> "${GITHUB_ENV}"
+          echo "ARTIFACT_NAME=inxm-local-${{ matrix.label }}.${{ matrix.ext }}" >> "${GITHUB_ENV}"
+          echo "Building INXM Local ${VERSION}"
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Stamp Cargo package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          version = os.environ["BUILD_VERSION"]
+
+          manifest_path = Path("Cargo.toml")
+          manifest, manifest_count = re.subn(
+              r'(?m)^(version\s*=\s*)"[^"]+"',
+              rf'\g<1>"{version}"',
+              manifest_path.read_text(),
+              count=1,
+          )
+          if manifest_count != 1:
+              raise SystemExit("Could not stamp the package version in Cargo.toml")
+          manifest_path.write_text(manifest)
+
+          lock_path = Path("Cargo.lock")
+          lock, lock_count = re.subn(
+              r'(?m)(^\[\[package\]\]\nname = "inxm-local"\nversion = )"[^"]+"',
+              rf'\g<1>"{version}"',
+              lock_path.read_text(),
+              count=1,
+          )
+          if lock_count != 1:
+              raise SystemExit("Could not stamp the inxm-local version in Cargo.lock")
+          lock_path.write_text(lock)
+          PY
+          cargo metadata --locked --no-deps --format-version 1 >/dev/null
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            libssl-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxkbcommon-dev
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build macOS app bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${BUILD_VERSION}"
+          APP="dist/INXM Local.app"
+          CONTENTS="${APP}/Contents"
+
+          mkdir -p "${CONTENTS}/MacOS" "${CONTENTS}/Resources" icon.iconset
+          install -m 755 "target/${{ matrix.target }}/release/${BINARY_NAME}" \
+            "${CONTENTS}/MacOS/${BINARY_NAME}"
+          install -m 644 LICENSE NOTICE "${CONTENTS}/Resources/"
+          install -m 644 assets/fonts/LICENSES.md \
+            "${CONTENTS}/Resources/THIRD_PARTY_LICENSES.md"
+
+          sips -z 16 16 assets/favicon512.png --out icon.iconset/icon_16x16.png >/dev/null
+          sips -z 32 32 assets/favicon512.png --out icon.iconset/icon_16x16@2x.png >/dev/null
+          sips -z 32 32 assets/favicon512.png --out icon.iconset/icon_32x32.png >/dev/null
+          sips -z 64 64 assets/favicon512.png --out icon.iconset/icon_32x32@2x.png >/dev/null
+          sips -z 128 128 assets/favicon512.png --out icon.iconset/icon_128x128.png >/dev/null
+          sips -z 256 256 assets/favicon512.png --out icon.iconset/icon_128x128@2x.png >/dev/null
+          sips -z 256 256 assets/favicon512.png --out icon.iconset/icon_256x256.png >/dev/null
+          sips -z 512 512 assets/favicon512.png --out icon.iconset/icon_256x256@2x.png >/dev/null
+          sips -z 512 512 assets/favicon512.png --out icon.iconset/icon_512x512.png >/dev/null
+          sips -z 1024 1024 assets/favicon512.png --out icon.iconset/icon_512x512@2x.png >/dev/null
+          iconutil -c icns icon.iconset -o "${CONTENTS}/Resources/inxm-local.icns"
+
+          cat > "${CONTENTS}/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key><string>en</string>
+            <key>CFBundleDisplayName</key><string>INXM // Local</string>
+            <key>CFBundleExecutable</key><string>${BINARY_NAME}</string>
+            <key>CFBundleIconFile</key><string>inxm-local.icns</string>
+            <key>CFBundleIdentifier</key><string>ai.inxm.local</string>
+            <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+            <key>CFBundleName</key><string>INXM Local</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>${VERSION}</string>
+            <key>CFBundleVersion</key><string>${VERSION}</string>
+            <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
+            <key>LSMinimumSystemVersion</key><string>11.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+
+          codesign --force --deep --sign - "${APP}"
+          ditto -c -k --sequesterRsrc --keepParent "${APP}" \
+            "dist/${{ env.ARTIFACT_NAME }}"
+
+      - name: Build Windows setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress --yes
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $version = $env:BUILD_VERSION
+          $stem = $env:ARTIFACT_STEM
+          @"
+          #define MyAppVersion "$version"
+
+          [Setup]
+          AppId=ai.inxm.local
+          AppName=INXM Local
+          AppVersion={#MyAppVersion}
+          AppPublisher=INXM
+          ; Per-user install: no admin/UAC prompt needed. {autopf} then
+          ; resolves to %LOCALAPPDATA%\Programs instead of Program Files.
+          ; The dialog override still lets admins pick an all-users install.
+          PrivilegesRequired=lowest
+          PrivilegesRequiredOverridesAllowed=dialog
+          DefaultDirName={autopf}\INXM Local
+          DefaultGroupName=INXM Local
+          DisableProgramGroupPage=yes
+          OutputDir=dist
+          OutputBaseFilename=$stem
+          SetupIconFile=assets\favicon.ico
+          UninstallDisplayIcon={app}\inxm-local.exe
+          Compression=lzma2
+          SolidCompression=yes
+          WizardStyle=modern
+          ArchitecturesAllowed=x64compatible
+          ArchitecturesInstallIn64BitMode=x64compatible
+
+          [Tasks]
+          Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"
+          Name: "startup"; Description: "Start INXM Local when you log in (hidden in the system tray)"; GroupDescription: "Startup:"; Flags: unchecked
+
+          [Files]
+          Source: "target\${{ matrix.target }}\release\inxm-local.exe"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "NOTICE"; DestDir: "{app}"; Flags: ignoreversion
+          Source: "assets\fonts\LICENSES.md"; DestDir: "{app}"; DestName: "THIRD_PARTY_LICENSES.md"; Flags: ignoreversion
+
+          [Icons]
+          Name: "{autoprograms}\INXM Local"; Filename: "{app}\inxm-local.exe"
+          Name: "{autodesktop}\INXM Local"; Filename: "{app}\inxm-local.exe"; Tasks: desktopicon
+          Name: "{userstartup}\INXM Local"; Filename: "{app}\inxm-local.exe"; Parameters: "--start-hidden"; Tasks: startup
+
+          [Run]
+          Filename: "{app}\inxm-local.exe"; Description: "Launch INXM Local"; Flags: nowait postinstall skipifsilent
+          "@ | Set-Content -Encoding utf8 installer.iss
+
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
+
+      - name: Build Linux package
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${BUILD_VERSION}"
+          ROOT="package-root"
+
+          install -Dm755 "target/${{ matrix.target }}/release/${BINARY_NAME}" \
+            "${ROOT}/usr/bin/${BINARY_NAME}"
+          install -Dm644 assets/favicon512.png \
+            "${ROOT}/usr/share/icons/hicolor/512x512/apps/ai.inxm.local.png"
+          install -Dm644 LICENSE \
+            "${ROOT}/usr/share/doc/inxm-local/LICENSE"
+          install -Dm644 NOTICE \
+            "${ROOT}/usr/share/doc/inxm-local/NOTICE"
+          install -Dm644 assets/fonts/LICENSES.md \
+            "${ROOT}/usr/share/doc/inxm-local/THIRD_PARTY_LICENSES.md"
+          mkdir -p "${ROOT}/usr/share/applications" "${ROOT}/DEBIAN" dist
+
+          cat > "${ROOT}/usr/share/applications/ai.inxm.local.desktop" <<'EOF'
+          [Desktop Entry]
+          Type=Application
+          Name=INXM Local
+          Comment=Local-first compiled-AI workflows
+          Exec=inxm-local
+          Icon=ai.inxm.local
+          Terminal=false
+          Categories=Development;Utility;
+          StartupWMClass=ai.inxm.local
+          EOF
+
+          INSTALLED_SIZE="$(du -sk "${ROOT}" | cut -f1)"
+          cat > "${ROOT}/DEBIAN/control" <<EOF
+          Package: inxm-local
+          Version: ${VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Installed-Size: ${INSTALLED_SIZE}
+          Maintainer: INXM
+          Depends: libc6, libgcc-s1, libgl1, libssl3, libgtk-3-0, libayatana-appindicator3-1, libwayland-client0, libx11-6, libxcb1, libxkbcommon0
+          Description: Local-first compiled-AI workflow desktop app
+           Compile natural-language requests into typed plans and execute them
+           deterministically with local tools.
+          EOF
+
+          dpkg-deb --build --root-owner-group "${ROOT}" \
+            "dist/${{ env.ARTIFACT_NAME }}"
+
+          # Per-user tarball: unpack and run ./install.sh — installs into
+          # ~/.local without root, unlike the .deb above.
+          TARBALL_ROOT="tarball-root/inxm-local"
+          mkdir -p "${TARBALL_ROOT}"
+          install -m 755 "target/${{ matrix.target }}/release/${BINARY_NAME}" \
+            "${TARBALL_ROOT}/${BINARY_NAME}"
+          install -m 644 assets/favicon512.png "${TARBALL_ROOT}/ai.inxm.local.png"
+          install -m 644 LICENSE NOTICE "${TARBALL_ROOT}/"
+          install -m 644 assets/fonts/LICENSES.md \
+            "${TARBALL_ROOT}/THIRD_PARTY_LICENSES.md"
+          install -m 755 packaging/linux/install.sh "${TARBALL_ROOT}/install.sh"
+          tar -czf "dist/${ARTIFACT_STEM}.tar.gz" -C tarball-root inxm-local
+
+          # Bootstrap installers: stable release-asset URLs for
+          # `curl .../releases/latest/download/install.sh | sh` and the
+          # PowerShell equivalent.
+          install -m 755 packaging/install.sh dist/install.sh
+          install -m 644 packaging/install.ps1 dist/install.ps1
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload package to GitHub Release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          artifacts=()
+          for artifact in dist/*; do
+            if [[ -f "${artifact}" ]]; then
+              artifacts+=("${artifact}")
+            fi
+          done
+
+          if (( ${#artifacts[@]} == 0 )); then
+            echo "No release artifacts found in dist" >&2
+            exit 1
+          fi
+
+          gh release upload "$RELEASE_TAG" "${artifacts[@]}" --clobber
