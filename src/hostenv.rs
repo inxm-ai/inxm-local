@@ -176,8 +176,9 @@ pub fn resolve_program(program: &str) -> PathBuf {
     find_on_path(program).unwrap_or_else(|| PathBuf::from(program))
 }
 
-/// A `PATH` value for spawned children: the current `PATH` plus
-/// [`well_known_bin_dirs`], deduped and filtered to directories that exist.
+/// A `PATH` value for spawned children: the current `PATH` entries as-is,
+/// plus any [`well_known_bin_dirs`] that both exist on disk and are not
+/// already present.
 ///
 /// Resolving a CLI's own binary (via [`resolve_program`]) is not enough when
 /// that binary is itself a script with an `env`-based shebang (e.g. the npm
@@ -187,9 +188,10 @@ pub fn resolve_program(program: &str) -> PathBuf {
 /// this to `Command::env("PATH", ..)` on every spawn that resolves through
 /// `hostenv`.
 ///
-/// Returns `None` only if `PATH` cannot be encoded (e.g. contains a NUL
-/// byte, which `std::env::join_paths` rejects) — callers should leave the
-/// child's `PATH` untouched in that case.
+/// Returns `None` only if the resulting `PATH` cannot be encoded — e.g. a
+/// directory contains a NUL byte or the platform path-list separator (`:`
+/// on Unix, `;` on Windows), which `std::env::join_paths` rejects — callers
+/// should leave the child's `PATH` untouched in that case.
 pub fn augmented_path() -> Option<std::ffi::OsString> {
     let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
         .map(|path_var| std::env::split_paths(&path_var).collect())
@@ -341,6 +343,11 @@ fn join_or_none(items: &[&str]) -> String {
 mod tests {
     use super::*;
 
+    // `HOME`/`PATH` are process-global; tests run in parallel by default, so
+    // any test that mutates them must hold this lock for its whole
+    // read-mutate-restore span to avoid racing another such test.
+    static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn fake_bin(dir: &Path, name: &str) -> PathBuf {
         let path = dir.join(name);
         std::fs::write(&path, "").unwrap();
@@ -413,7 +420,10 @@ mod tests {
         let program = "inxm-fake-cli-xyz";
         fake_bin(&bin, program);
 
-        // Scope env mutation to this test; other tests do not touch HOME/PATH.
+        // Held for the whole read-mutate-restore span so this can't race
+        // `augmented_path_includes_well_known_dir_missing_from_path`, the
+        // other test that mutates HOME/PATH.
+        let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_home = std::env::var_os("HOME");
         let prev_path = std::env::var_os("PATH");
         // SAFETY: single-threaded test body; restored before returning.
@@ -444,6 +454,10 @@ mod tests {
         let bin = home.path().join(".local/bin");
         std::fs::create_dir_all(&bin).unwrap();
 
+        // Held for the whole read-mutate-restore span so this can't race
+        // `find_on_path_falls_back_to_well_known_dir`, the other test that
+        // mutates HOME/PATH.
+        let _guard = ENV_MUTATION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_home = std::env::var_os("HOME");
         let prev_path = std::env::var_os("PATH");
         // SAFETY: single-threaded test body; restored before returning.
