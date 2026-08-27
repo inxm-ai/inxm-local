@@ -580,18 +580,24 @@ async fn run_cli(
     // was launched from a desktop/tray with a minimal `PATH`. Falls back to
     // the bare name so the OS `ENOENT` stays meaningful when truly missing.
     let resolved = crate::hostenv::resolve_program(executable);
-    let mut child = tokio::process::Command::new(&resolved)
+    let mut command = tokio::process::Command::new(&resolved);
+    command
         .args(args)
         .current_dir(std::env::temp_dir())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| LlmError::CliStart {
-            provider,
-            message: e.to_string(),
-        })?;
+        .kill_on_drop(true);
+    // The resolved binary may itself be a script with an `env`-based
+    // shebang (e.g. `#!/usr/bin/env node`), so the child also needs an
+    // augmented `PATH`, not just a resolved own path.
+    if let Some(path) = crate::hostenv::augmented_path() {
+        command.env("PATH", path);
+    }
+    let mut child = command.spawn().map_err(|e| LlmError::CliStart {
+        provider,
+        message: e.to_string(),
+    })?;
     if let Some(mut input) = child.stdin.take() {
         input
             .write_all(stdin.as_bytes())
@@ -832,8 +838,12 @@ pub async fn test_codex_sandbox(executable: &str) -> Result<(), String> {
         "landlock"
     };
     let resolved = crate::hostenv::resolve_program(executable);
-    let output = tokio::process::Command::new(&resolved)
-        .args(["debug", debug_subcommand, "--", "true"])
+    let mut command = tokio::process::Command::new(&resolved);
+    command.args(["debug", debug_subcommand, "--", "true"]);
+    if let Some(path) = crate::hostenv::augmented_path() {
+        command.env("PATH", path);
+    }
+    let output = command
         .output()
         .await
         .map_err(|error| format!("failed to run '{}': {error}", resolved.display()))?;

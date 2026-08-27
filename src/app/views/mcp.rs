@@ -773,24 +773,43 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
     let mut close_draft = false;
     ui.horizontal(|ui| {
         if widgets::primary_button(ui, "Save tool").clicked() {
-            match draft.to_entry() {
-                Ok(entry) => {
-                    state.notice = Some(format!("Saved “{}”.", entry.name));
-                    match &draft.editing {
-                        Some(old) if *old != entry.name => {
-                            engine.send(EngineCommand::RenameTool {
-                                old_name: old.clone(),
-                                entry: Box::new(entry),
-                            });
-                        }
-                        _ => engine.send(EngineCommand::SaveTool {
-                            entry: Box::new(entry),
-                        }),
-                    }
+            // A pending bulk-discovery selection takes priority: the user
+            // most likely meant "confirm the import" rather than "save the
+            // (empty) single-tool form" — treat Save as Import here instead
+            // of failing on the unrelated `tool_name` field.
+            let pending_selection = state
+                .discovery
+                .as_ref()
+                .and_then(|discovery| selected_discovered_entries(draft, discovery));
+            match pending_selection {
+                Some(Ok(entries)) => {
+                    let count = entries.len();
+                    engine.send(EngineCommand::BulkSaveTools { entries });
+                    state.notice = Some(format!("Imported {count} tool(s)."));
+                    state.discovery = None;
                     state.error = None;
                     close_draft = true;
                 }
-                Err(message) => state.error = Some(message),
+                Some(Err(message)) => state.error = Some(message),
+                None => match draft.to_entry() {
+                    Ok(entry) => {
+                        state.notice = Some(format!("Saved “{}”.", entry.name));
+                        match &draft.editing {
+                            Some(old) if *old != entry.name => {
+                                engine.send(EngineCommand::RenameTool {
+                                    old_name: old.clone(),
+                                    entry: Box::new(entry),
+                                });
+                            }
+                            _ => engine.send(EngineCommand::SaveTool {
+                                entry: Box::new(entry),
+                            }),
+                        }
+                        state.error = None;
+                        close_draft = true;
+                    }
+                    Err(message) => state.error = Some(message),
+                },
             }
         }
         if widgets::ghost_button(ui, "Cancel").clicked() {
@@ -922,12 +941,7 @@ fn bulk_import_section(
     }
 
     let selected_count = found.tools.iter().filter(|t| t.selected).count();
-    let built: Result<Vec<ToolEntry>, String> = found
-        .tools
-        .iter()
-        .filter(|t| t.selected)
-        .map(|discovered| discovered_tool_to_entry(draft, &discovered.tool))
-        .collect();
+    let built = selected_discovered_entries(draft, found).unwrap_or(Ok(Vec::new()));
     // `found`'s borrow of `*discovery` ends here — nothing below reads it,
     // so the button handler below is free to reset `*discovery`.
 
@@ -950,6 +964,27 @@ fn bulk_import_section(
             *discovery = None;
         }
     });
+}
+
+/// Builds catalog entries for every selected tool in `discovery`. Returns
+/// `None` when nothing is selected (so callers can fall back to another
+/// save path), otherwise the [`discovered_tool_to_entry`] result — `Err`
+/// surfaces a real connection/transport problem rather than a per-tool one.
+fn selected_discovered_entries(
+    draft: &ToolDraft,
+    discovery: &McpDiscoveryState,
+) -> Option<Result<Vec<ToolEntry>, String>> {
+    let selected: Vec<&DiscoveredToolDraft> =
+        discovery.tools.iter().filter(|t| t.selected).collect();
+    if selected.is_empty() {
+        return None;
+    }
+    Some(
+        selected
+            .into_iter()
+            .map(|discovered| discovered_tool_to_entry(draft, &discovered.tool))
+            .collect(),
+    )
 }
 
 /// Builds a catalog entry for one discovered tool, using the draft's own

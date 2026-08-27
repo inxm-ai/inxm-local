@@ -377,6 +377,12 @@ async fn run_process(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    // The resolved binary may itself be a script with an `env`-based
+    // shebang (e.g. `#!/usr/bin/env node`), so the child also needs an
+    // augmented `PATH`, not just a resolved own path.
+    if let Some(path) = crate::hostenv::augmented_path() {
+        command.env("PATH", path);
+    }
     #[cfg(unix)]
     command.process_group(0);
     let mut child = command.spawn().map_err(|error| {

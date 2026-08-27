@@ -176,6 +176,32 @@ pub fn resolve_program(program: &str) -> PathBuf {
     find_on_path(program).unwrap_or_else(|| PathBuf::from(program))
 }
 
+/// A `PATH` value for spawned children: the current `PATH` plus
+/// [`well_known_bin_dirs`], deduped and filtered to directories that exist.
+///
+/// Resolving a CLI's own binary (via [`resolve_program`]) is not enough when
+/// that binary is itself a script with an `env`-based shebang (e.g. the npm
+/// `codex`/`claude` CLIs use `#!/usr/bin/env node`): the *child's* `PATH`
+/// also needs the node/nvm/volta bin directory, or `env` fails with `node:
+/// No such file or directory` even though the app found `codex` fine. Pass
+/// this to `Command::env("PATH", ..)` on every spawn that resolves through
+/// `hostenv`.
+///
+/// Returns `None` only if `PATH` cannot be encoded (e.g. contains a NUL
+/// byte, which `std::env::join_paths` rejects) — callers should leave the
+/// child's `PATH` untouched in that case.
+pub fn augmented_path() -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path_var| std::env::split_paths(&path_var).collect())
+        .unwrap_or_default();
+    for dir in well_known_bin_dirs() {
+        if dir.is_dir() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs).ok()
+}
+
 /// Verify that an interpreter can actually be spawned by attempting to start
 /// and immediately kill a process.
 ///
@@ -407,6 +433,45 @@ mod tests {
             }
         }
         assert_eq!(found.as_deref(), Some(bin.join(program).as_path()));
+    }
+
+    #[test]
+    fn augmented_path_includes_well_known_dir_missing_from_path() {
+        // A well-known dir (e.g. a node-manager bin dir) absent from a
+        // minimal PATH must still show up in the child-process PATH, so a
+        // resolved CLI's own `env`-based shebang can find its interpreter.
+        let home = tempfile::tempdir().unwrap();
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+
+        let prev_home = std::env::var_os("HOME");
+        let prev_path = std::env::var_os("PATH");
+        // SAFETY: single-threaded test body; restored before returning.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("PATH", "/usr/bin");
+        }
+        let augmented = augmented_path();
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let augmented = augmented.expect("PATH should encode cleanly");
+        let dirs: Vec<PathBuf> = std::env::split_paths(&augmented).collect();
+        assert!(
+            dirs.contains(&PathBuf::from("/usr/bin")),
+            "expected original PATH entry preserved, got {dirs:?}"
+        );
+        assert!(
+            dirs.contains(&bin),
+            "expected well-known dir {bin:?} appended, got {dirs:?}"
+        );
     }
 
     #[test]
