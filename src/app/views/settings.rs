@@ -10,7 +10,7 @@ use crate::app::mcp_server::ServerStatus;
 use crate::app::{theme, widgets};
 use crate::llm::CodexSandboxMode;
 
-const RELEASES_URL: &str = "https://github.com/inxm-ai/matthias-hackathon-inxm/releases";
+const RELEASES_URL: &str = "https://github.com/inxm-ai/inxm-local/releases";
 const MODEL_HINT: &str = "empty = connection default";
 const KEY_HINT: &str = "empty = use ANTHROPIC_API_KEY / OPENAI_API_KEY";
 const AUTO_MODE_DESCRIPTION: &str = "Skips the design-approval step when creating plans: a \
