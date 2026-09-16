@@ -2719,7 +2719,15 @@ fn input_area(
             ui.set_min_height(box_height);
             // Keep Enter as the quick-submit shortcut while allowing the
             // multiline editor to wrap and Shift+Enter to insert a newline.
-            let enter = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+            // `consume_key` matches modifiers with `Modifiers::matches_logically`,
+            // which ignores an *extra* Shift/Alt — so `consume_key(NONE, Enter)`
+            // alone would also fire (and steal the keypress) on Shift+Enter.
+            // Guard on the held modifiers first so Shift+Enter is left for the
+            // `TextEdit`'s own `return_key` handling below to insert a newline.
+            let shift_held = ui.input(|i| i.modifiers.shift);
+            let enter = focused
+                && !shift_held
+                && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
             // Capped so a long pasted intent scrolls inside the box instead
             // of growing the composer (and pushing Send off-screen). The
             // width is reserved up front so Send still fits on this row.
