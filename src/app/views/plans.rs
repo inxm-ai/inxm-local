@@ -66,7 +66,7 @@ pub fn show(
 ) -> Option<PlansAction> {
     let mut action = None;
 
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(8.0);

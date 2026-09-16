@@ -56,7 +56,7 @@ pub fn show(
     plans: &[PlanListItem],
     engine: &EngineHandle,
 ) {
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(8.0);

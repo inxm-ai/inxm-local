@@ -198,7 +198,7 @@ pub fn show_workspace(
                 // Inputs and history share one scroll area that fills the
                 // space between the header above and the docked action row
                 // below; history is always open.
-                egui::ScrollArea::vertical()
+                widgets::scroll_area_vertical()
                     .id_salt(card_id.with("card_body"))
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
@@ -315,7 +315,7 @@ fn show_expanded_workspace(
                     });
                     ui.separator();
                     let body_height = ui.available_height();
-                    egui::ScrollArea::vertical()
+                    widgets::scroll_area_vertical()
                         .id_salt(card_id.with("inspection_scroll"))
                         .auto_shrink([false, false])
                         .max_height(body_height)
@@ -984,7 +984,7 @@ fn footer(
         ui.add_space(4.0);
         let json =
             crate::plan::to_json(plan).unwrap_or_else(|e| format!("failed to serialise: {e}"));
-        egui::ScrollArea::vertical()
+        widgets::scroll_area_vertical()
             .id_salt(card_id.with("json_scroll"))
             .max_height(260.0)
             .show(ui, |ui| {
@@ -1174,7 +1174,7 @@ fn expandable_text(
             ui.ctx()
                 .data_mut(|data| data.insert_temp(id.with("expanded"), expanded));
         }
-        egui::ScrollArea::vertical()
+        widgets::scroll_area_vertical()
             .id_salt(id.with("content_scroll"))
             .auto_shrink([false, false])
             .max_height(EXPANDED_RESULT_MAX_HEIGHT)
@@ -1296,7 +1296,7 @@ fn step_detail(
 /// One labelled, selectable, scrollable text block.
 fn detail_block(ui: &mut Ui, id: Id, label: &str, mut text: &str) {
     widgets::section_label(ui, label);
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .id_salt(id)
         .max_height(DETAIL_BLOCK_MAX_HEIGHT)
         .show(ui, |ui| {

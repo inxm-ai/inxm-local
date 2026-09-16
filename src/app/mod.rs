@@ -1703,7 +1703,7 @@ impl InxmApp {
             Open(String),
             Delete(String),
         }
-        let action = egui::ScrollArea::vertical()
+        let action = widgets::scroll_area_vertical()
             .id_salt("sidebar_chats")
             .auto_shrink([false, true])
             .show(ui, |ui| {

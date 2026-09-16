@@ -40,13 +40,34 @@ pub fn wrapped_label(ui: &mut Ui, text: RichText) {
 /// A wrapped label capped at `max_height`: text taller than the cap scrolls
 /// inside its own area instead of stretching the surrounding layout.
 pub fn clamped_label(ui: &mut Ui, id: egui::Id, text: RichText, max_height: f32) {
-    egui::ScrollArea::vertical()
+    scroll_area_vertical()
         .id_salt(id)
         .max_height(max_height)
         .auto_shrink([false, true])
         .show(ui, |ui| {
             wrapped_label(ui, text);
         });
+}
+
+// ─── Scroll areas ───────────────────────────────────────────────────────────
+
+/// A vertical [`egui::ScrollArea`] with drag-to-scroll turned off.
+///
+/// egui's default `ScrollArea` senses drags on its content so it can be
+/// panned on touch screens. On a mouse-driven desktop app that sense sits in
+/// front of every selectable `Label`/`TextEdit` inside it: click-and-drag
+/// starts a scroll instead of a text selection (see egui's "widget
+/// interaction" docs — an unclaimed drag falls through to the first
+/// drag-sensitive widget behind it, which is the scroll area). Wheel and
+/// scrollbar scrolling are unaffected. Every scroll area that can contain
+/// selectable text should be built from this helper instead of
+/// `egui::ScrollArea::vertical()` directly.
+pub fn scroll_area_vertical() -> egui::ScrollArea {
+    egui::ScrollArea::vertical().scroll_source(egui::scroll_area::ScrollSource {
+        scroll_bar: true,
+        drag: false,
+        mouse_wheel: true,
+    })
 }
 
 /// Muted uppercase section label.
