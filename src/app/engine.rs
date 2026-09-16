@@ -4542,11 +4542,10 @@ pub(crate) fn resolve_import_conflict(
 // ─── Update check ──────────────────────────────────────────────────────────────
 
 /// GitHub API endpoint for the newest published release.
-const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/inxm-ai/matthias-hackathon-inxm/releases/latest";
+const RELEASES_API_URL: &str = "https://api.github.com/repos/inxm-ai/inxm-local/releases/latest";
 /// Human-facing releases page, used as a fallback if the API response is
 /// missing an `html_url` for some reason.
-pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/matthias-hackathon-inxm/releases";
+pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/inxm-local/releases";
 
 /// Best-effort GitHub release check. Never surfaces an error to the UI:
 /// network hiccups, rate limiting, or a malformed response all just mean
