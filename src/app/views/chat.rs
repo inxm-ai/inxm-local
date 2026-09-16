@@ -2701,14 +2701,20 @@ fn input_area(
         let row_font = egui::TextStyle::Body.resolve(ui.style());
         let row_height = ui.text_style_height(&egui::TextStyle::Body);
         let edit_width = ui.available_width() - 76.0;
-        let content_height = ui
-            .fonts(|fonts| {
-                fonts
-                    .layout(state.input.clone(), row_font, egui::Color32::WHITE, edit_width.max(1.0))
-                    .size()
-                    .y
-            });
-        let box_height = content_height.max(row_height).clamp(row_height, COMPOSER_MAX_HEIGHT);
+        let content_height = ui.fonts(|fonts| {
+            fonts
+                .layout(
+                    state.input.clone(),
+                    row_font,
+                    egui::Color32::WHITE,
+                    edit_width.max(1.0),
+                )
+                .size()
+                .y
+        });
+        let box_height = content_height
+            .max(row_height)
+            .clamp(row_height, COMPOSER_MAX_HEIGHT);
         ui.horizontal(|ui| {
             ui.set_min_height(box_height);
             // Keep Enter as the quick-submit shortcut while allowing the
