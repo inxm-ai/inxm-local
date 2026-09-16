@@ -133,7 +133,7 @@ pub fn show(
     telemetry_opt_in: &mut bool,
 ) -> Option<OnboardingAction> {
     let mut action = None;
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.vertical_centered(|ui| {

@@ -317,7 +317,7 @@ pub fn show(ui: &mut Ui, registry: &ActivityRegistry) {
                         Some(entry.terminal_tail)
                     };
                     if let Some(lines) = lines.filter(|lines| !lines.is_empty()) {
-                        egui::ScrollArea::vertical()
+                        widgets::scroll_area_vertical()
                             .id_salt(("activity-console", entry.id))
                             .max_height(120.0)
                             .show(ui, |ui| {

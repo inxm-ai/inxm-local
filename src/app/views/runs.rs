@@ -87,7 +87,7 @@ pub fn show(
     let mut action = None;
     let running_count = count_running(runs);
 
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             ui.add_space(8.0);

@@ -34,6 +34,10 @@ const DESIGN_PANEL_DEFAULT_WIDTH: f32 = 340.0;
 const CHAT_SPLIT_MIN_CHAT_WIDTH: f32 = 320.0;
 const CHAT_SPLIT_MIN_PANEL_WIDTH: f32 = 240.0;
 const DEFAULT_COMPOSER_HINT: &str = "Describe a plan, or type / for commands…";
+/// Caps the composer's growth: past this, the multiline input scrolls
+/// internally instead of pushing the Send button out of the window (a long
+/// pasted intent could otherwise grow the bottom panel past the viewport).
+const COMPOSER_MAX_HEIGHT: f32 = 320.0;
 /// Replaces the approve button while auto mode is on, so the DESIGN phase
 /// still shows what is happening to the design on screen. Phrased as the
 /// standing rule rather than a live progress report: a design restored from
@@ -828,7 +832,7 @@ pub fn show(
         .frame(egui::Frame::new().fill(theme::bg()))
         .show_inside(ui, |ui| {
             let showing_hero = state.messages.is_empty() && state.busy.is_none();
-            egui::ScrollArea::vertical()
+            widgets::scroll_area_vertical()
                 .auto_shrink([false, false])
                 .stick_to_bottom(!showing_hero)
                 .show(ui, |ui| {
@@ -1491,7 +1495,7 @@ fn console_panel(ui: &mut Ui, console: &CompileConsole) {
         );
     }
     let start = snapshot.lines.len().saturating_sub(CONSOLE_VIEW_LINES);
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .id_salt("compile_console_scroll")
         .max_height(CONSOLE_MAX_HEIGHT)
         .auto_shrink([false, true])
@@ -1588,6 +1592,9 @@ fn spec_card(ui: &mut Ui, flow: &GuidedFlow) {
                             .size(theme::FONT_SMALL)
                             .color(confidence_color(assessment.confidence)),
                     );
+                    if widgets::ghost_button(ui, "Copy").clicked() {
+                        ui.ctx().copy_text(assessment.spec.desired_outcome.clone());
+                    }
                 });
             });
             ui.add_space(4.0);
@@ -1597,7 +1604,21 @@ fn spec_card(ui: &mut Ui, flow: &GuidedFlow) {
             );
             if !assessment.spec.acceptance_criteria.is_empty() {
                 ui.add_space(6.0);
-                widgets::section_label(ui, "Acceptance criteria");
+                ui.horizontal(|ui| {
+                    widgets::section_label(ui, "Acceptance criteria");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::ghost_button(ui, "Copy").clicked() {
+                            let text = assessment
+                                .spec
+                                .acceptance_criteria
+                                .iter()
+                                .map(|criterion| format!("• {criterion}"))
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.ctx().copy_text(text);
+                        }
+                    });
+                });
                 for criterion in &assessment.spec.acceptance_criteria {
                     widgets::wrapped_label(
                         ui,
@@ -1609,7 +1630,31 @@ fn spec_card(ui: &mut Ui, flow: &GuidedFlow) {
             }
             if !assessment.spec.inputs.is_empty() {
                 ui.add_space(6.0);
-                widgets::section_label(ui, "Invocation inputs");
+                ui.horizontal(|ui| {
+                    widgets::section_label(ui, "Invocation inputs");
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if widgets::ghost_button(ui, "Copy").clicked() {
+                            let text = assessment
+                                .spec
+                                .inputs
+                                .iter()
+                                .map(|input| {
+                                    let requirement = if input.required {
+                                        "required"
+                                    } else {
+                                        "optional"
+                                    };
+                                    format!(
+                                        "• {} ({}, {requirement}) — {}",
+                                        input.name, input.value_type, input.description
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            ui.ctx().copy_text(text);
+                        }
+                    });
+                });
                 for input in &assessment.spec.inputs {
                     let requirement = if input.required {
                         "required"
@@ -1708,7 +1753,7 @@ fn design_panel(ui: &mut Ui, flow: &GuidedFlow) {
         return;
     };
 
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .id_salt("chat_design_panel_scroll")
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -2646,19 +2691,50 @@ fn input_area(
 
     let mut submitted = false;
     input_frame.show(ui, |ui| {
+        // `ScrollArea` sizes itself from the *available* height of its
+        // surrounding layout, clamped to [min_scrolled_height, max_height] —
+        // it does not grow the row to reach max_height on its own, and
+        // `ui.horizontal` only offers a small initial height. So the content
+        // height is measured up front and reserved via `set_min_height`
+        // before the row is laid out; otherwise the box sits at the (tiny)
+        // default floor no matter how large max_height is.
+        let row_font = egui::TextStyle::Body.resolve(ui.style());
+        let row_height = ui.text_style_height(&egui::TextStyle::Body);
+        let edit_width = ui.available_width() - 76.0;
+        let content_height = ui
+            .fonts(|fonts| {
+                fonts
+                    .layout(state.input.clone(), row_font, egui::Color32::WHITE, edit_width.max(1.0))
+                    .size()
+                    .y
+            });
+        let box_height = content_height.max(row_height).clamp(row_height, COMPOSER_MAX_HEIGHT);
         ui.horizontal(|ui| {
+            ui.set_min_height(box_height);
             // Keep Enter as the quick-submit shortcut while allowing the
             // multiline editor to wrap and Shift+Enter to insert a newline.
             let enter = focused && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
-            let edit = ui.add(
-                egui::TextEdit::multiline(&mut state.input)
-                    .hint_text(input_hint)
-                    .frame(false)
-                    .desired_rows(1)
-                    .desired_width(ui.available_width() - 76.0)
-                    .return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
-                    .id(input_id),
-            );
+            // Capped so a long pasted intent scrolls inside the box instead
+            // of growing the composer (and pushing Send off-screen). The
+            // width is reserved up front so Send still fits on this row.
+            let edit = widgets::scroll_area_vertical()
+                .id_salt(input_id.with("scroll"))
+                .max_height(COMPOSER_MAX_HEIGHT)
+                .min_scrolled_height(row_height)
+                .max_width(edit_width)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.input)
+                            .hint_text(input_hint)
+                            .frame(false)
+                            .desired_rows(1)
+                            .desired_width(edit_width)
+                            .return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                            .id(input_id),
+                    )
+                })
+                .inner;
             if state.focus_input {
                 edit.request_focus();
                 state.focus_input = false;

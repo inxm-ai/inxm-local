@@ -364,7 +364,7 @@ pub fn show(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &Eng
                 .inner_margin(egui::Margin::same(16)),
         )
         .show_inside(ui, |ui| {
-            egui::ScrollArea::vertical()
+            widgets::scroll_area_vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| editor(ui, state, engine));
         });
@@ -388,7 +388,7 @@ fn tool_list(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &En
     describe_section(ui, state, engine);
     ui.add_space(6.0);
 
-    egui::ScrollArea::vertical()
+    widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
             if tools.is_empty() {
