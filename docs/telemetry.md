@@ -85,7 +85,7 @@ There are **no identifiers** (no machine id, install id, hostname, username),
 **no client timestamps** (counters are totals with no ordering or session
 boundaries beyond "since the last launch"), and **no user content** (no plan
 names, run ids, prompts, or paths). The schema is enforced on both ends: the
-client types are `src/telemetry/schema.rs`, and the receiving worker rejects
+client types are [`src/telemetry/schema.rs`](https://github.com/inxm-ai/inxm-local/blob/main/src/telemetry/schema.rs), and the receiving worker rejects
 any payload with extra, missing, or out-of-range fields.
 
 ## How to disable it
@@ -103,7 +103,7 @@ telemetry:
 ## Where it goes, and for how long
 
 Events go to `https://telemetry.inxm.ai/v1/event`, a Cloudflare Worker whose
-full source is in [`telemetry-worker/`](../telemetry-worker/). The worker
+full source is in [`telemetry-worker/`](https://github.com/inxm-ai/inxm-local/tree/main/telemetry-worker). The worker
 writes one row per ping into Cloudflare **Workers Analytics Engine** and
 nothing else: the client IP is never read or stored, no cookies are set, no
 request headers are persisted. Analytics Engine keeps data for roughly
@@ -128,5 +128,5 @@ spend time in. None of it can be traced back to a machine.
 Every send runs on a detached thread with a 3-second timeout; failures are
 swallowed (visible only at `debug` trace level). Telemetry can never delay
 startup, block a run, or surface an error. The exact sending code is
-[`src/telemetry/sender.rs`](../src/telemetry/sender.rs) — it is the only
+[`src/telemetry/sender.rs`](https://github.com/inxm-ai/inxm-local/blob/main/src/telemetry/sender.rs) — it is the only
 place in the codebase that talks to the telemetry endpoint.

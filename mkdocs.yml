@@ -9,3 +9,7 @@ theme:
 
 nav:
   - Home: index.md
+  - Integrations:
+      - Hermes Agent: integration/hermes.md
+  - Reference:
+      - Telemetry: telemetry.md
