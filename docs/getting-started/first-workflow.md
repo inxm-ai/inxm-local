@@ -43,7 +43,7 @@ Use `/inspect` to see the latest run, including step status, timing, outputs, an
 
 ---
 
-## What's next
+<h2>What's next</h2>
 
 - Understand [plans, runs, and repairs](../concepts/plans-and-runs.md).
 - Learn all [chat workflow commands](../user-guide/chat-workflows.md).
