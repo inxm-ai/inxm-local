@@ -37,11 +37,9 @@ The executor validates required and unknown inputs before starting. The plan car
 
 Use `/inspect` to see the latest run, including step status, timing, outputs, and errors. Use `/runs` to list recent runs.
 
----
+**Congratulations!** 🥳
 
-> 🎉 **Congratulations!**
->
-> You have built, run, and inspected your first INXM Local plan. From here, you can reuse it with different inputs, connect it to tools, or explore how plans, runs, and repairs fit together.
+*You have built, run, and inspected your first INXM Local plan. From here, you can reuse it with different inputs, connect it to tools, or explore how plans, runs, and repairs fit together.*
 
 ---
 
