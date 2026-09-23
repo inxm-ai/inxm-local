@@ -34,20 +34,15 @@ Download a package from [GitHub Releases](https://github.com/inxm-ai/inxm-local/
 
 Choose `aarch64` for Apple Silicon or `x86_64` for Intel, unzip the `.app.zip`, and open the app.
 
-### 🪟 Windows
-
-Run the `x86_64-pc-windows-msvc-setup.exe` installer.
-
-### 🐧 Linux
-
-- Debian or Ubuntu: install the `x86_64-unknown-linux-gnu.deb` package with `sudo apt install ./<package>.deb`.
-- Without root: use the release `.tar.gz` and its `install.sh` script.
-
 Release builds are not notarized or signed. macOS may require **Open Anyway** in **System Settings -> Privacy & Security**, or removal of the quarantine attribute after unzipping:
 
 ```sh
 xattr -dr com.apple.quarantine ~/Applications/"INXM Local.app"
 ```
+
+### 🪟 Windows
+
+Run the `x86_64-pc-windows-msvc-setup.exe` installer.
 
 Windows SmartScreen may require **More info -> Run anyway** or:
 
@@ -55,10 +50,33 @@ Windows SmartScreen may require **More info -> Run anyway** or:
 Unblock-File .\inxm-local-x86_64-pc-windows-msvc-setup.exe
 ```
 
+### 🐧 Linux
+
+- Debian or Ubuntu: install the `x86_64-unknown-linux-gnu.deb` package with `sudo apt install ./<package>.deb`.
+- Without root: use the release `.tar.gz` and its `install.sh` script.
+
+### Other installer options
+
+| macOS/Linux | Windows | What it does |
+| --- | --- | --- |
+| `--agents` | `-Agents` | Register every supported agent detected on the machine. |
+| Individual agent flags | Matching switches | Register one or more specific coding agents; see the table above. |
+| `--autostart` | Not available | Linux: start INXM Local hidden at login. |
+| `--version 0.1.0` | `-Version 0.1.0` | Pin the installation to a specific release. |
+| `--uninstall` | Windows app uninstall | Remove the app and its agent registrations. |
+
+### Installer environment variables
+
+| Variable | What it does |
+| --- | --- |
+| `INXM_MCP_URL` | MCP endpoint registered with coding agents; defaults to `http://127.0.0.1:39387/mcp`. |
+| `PREFIX` | Linux installation root; defaults to `$HOME/.local`. |
+
+Both installer scripts are attached to each release and can be downloaded directly from the [latest release](https://github.com/inxm-ai/inxm-local/releases/latest).
+
 ## Verify the installation
 
 Open INXM Local. The app should show the chat view. Select a compiler connection under **Settings -> Compiler** before compiling a plan. If the local MCP server is enabled, its status and port are shown in the application settings.
-
 
 ## Register coding agents
 
@@ -135,14 +153,6 @@ The Unix flags and Windows switches below perform the same registration. Existin
 | `--zed` | `-Zed` | Zed | Adds the MCP server to Zed and installs the `use-inxm-mcp` skill. |
 
 See [Use INXM Local with coding agents](../user-guide/coding-agents.md) for the complete guide.
-
-Other useful flag options:
-
-| Option | What it does |
-| --- | --- | 
-| `--autostart` | Linux: start INXM Local hidden at login. |
-| `--version 0.1.0` | Pin the installation to a specific release. |
-| `--uninstall` | Remove the app and agent registrations. |
 
 <h2>What's next</h2>
 
