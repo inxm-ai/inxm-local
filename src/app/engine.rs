@@ -416,7 +416,7 @@ pub struct AppSettings {
     /// settings file at all, i.e. a genuine new install) produces `false`.
     #[serde(default = "default_onboarding_completed")]
     pub onboarding_completed: bool,
-    /// Anonymous usage telemetry (see `docs/telemetry.md`).
+    /// Anonymous usage telemetry (see `docs/reference/telemetry.md`).
     /// On by default *at the setup assistant*: its checkbox starts checked
     /// and dismissing the card persists the checkbox as shown, so opting
     /// out means unchecking it. `None` means the user was never shown the

@@ -140,7 +140,7 @@ fn run_headless() {
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
-    // Opt-in only; a no-op unless the user enabled it (docs/telemetry.md).
+    // Opt-in only; a no-op unless the user enabled it (docs/reference/telemetry.md).
     inxm_local::telemetry::record_app_started(
         settings.telemetry_enabled,
         inxm_local::telemetry::Channel::Headless,
@@ -205,7 +205,7 @@ fn run_mcp_only() {
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
-    // Opt-in only; a no-op unless the user enabled it (docs/telemetry.md).
+    // Opt-in only; a no-op unless the user enabled it (docs/reference/telemetry.md).
     inxm_local::telemetry::record_app_started(
         settings.telemetry_enabled,
         inxm_local::telemetry::Channel::McpOnly,

@@ -9,7 +9,7 @@
 //! - CLI: `--no-telemetry`
 //!
 //! What is collected, where it goes, and for how long it is kept is
-//! documented in `docs/telemetry.md`; the schema in [`schema`] is exhaustive
+//! documented in `docs/reference/telemetry.md`; the schema in [`schema`] is exhaustive
 //! and the sending code in [`sender`] is the only place a request is made.
 //! Sends are fire-and-forget: a failure can never affect normal operation.
 

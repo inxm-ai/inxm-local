@@ -674,7 +674,7 @@ pub fn show(
                          experimental mode, and seconds per view. No identifiers, no \
                          timestamps, nothing about your plans' content; the pending \
                          batch is inspectable in telemetry-usage.json in the data dir. \
-                         See docs/telemetry.md for the exact schema, destination, and \
+                         See docs/reference/telemetry.md for the exact schema, destination, and \
                          retention. It can also be forced off with INXM_TELEMETRY=off \
                          or the --no-telemetry flag.",
                     )
