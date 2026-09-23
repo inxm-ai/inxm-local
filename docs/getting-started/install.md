@@ -2,8 +2,6 @@
 
 Install a release package when you want to use the desktop application.
 
----
-
 ## Quick install
 
 The recommended way to install INXM Local is to use the quick install command for your operating system. It downloads the latest release and installs it per-user (no root needed).
@@ -27,8 +25,6 @@ curl -fsSL https://raw.githubusercontent.com/inxm-ai/inxm-local/main/packaging/i
 ```
 
 The scripts install per user. The Unix installer supports `--version`, `--autostart`, `--agents`, individual agent flags, and `--uninstall`. Existing agent configuration is merged and registration is idempotent. Use `INXM_MCP_URL` when registering an endpoint other than the default.
-
----
 
 ## Manual installation
 
@@ -59,13 +55,10 @@ Windows SmartScreen may require **More info -> Run anyway** or:
 Unblock-File .\inxm-local-x86_64-pc-windows-msvc-setup.exe
 ```
 
----
-
 ## Verify the installation
 
 Open INXM Local. The app should show the chat view. Select a compiler connection under **Settings -> Compiler** before compiling a plan. If the local MCP server is enabled, its status and port are shown in the application settings.
 
----
 
 ## Register coding agents
 
@@ -150,8 +143,6 @@ Other useful flag options:
 | `--autostart` | Linux: start INXM Local hidden at login. |
 | `--version 0.1.0` | Pin the installation to a specific release. |
 | `--uninstall` | Remove the app and agent registrations. |
-
----
 
 <h2>What's next</h2>
 

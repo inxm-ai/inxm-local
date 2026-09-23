@@ -8,8 +8,6 @@ We believe this is a better starting point for AI workflows than asking a model 
 
 If you need the same approach at enterprise scale, with governance, auditability, and integration across the business systems you already run, learn more about [INXM Orchestrator](https://www.inxm.ai/) or [talk to us](https://www.inxm.ai/contact.html).
 
----
-
 ## What INXM Local is not
 
 INXM Local is deliberately not another chat assistant that produces a fresh answer and loses the workflow behind it. It is not an unrestricted autonomous agent that silently changes its behavior while a run is in progress. It is not a black box that asks a model what to do next at every step.
@@ -17,8 +15,6 @@ INXM Local is deliberately not another chat assistant that produces a fresh answ
 Instead, INXM Local makes the workflow a saved, versioned artifact. The compiler may use a language model to create or repair that artifact, and a plan may explicitly include bounded model-backed work. Once execution begins, however, the deterministic executor follows the saved steps, validates inputs, persists progress, pauses for declared human interaction, and exposes failures for inspection or repair.
 
 INXM Local is also not a replacement for the systems a workflow connects to. Compiler backends, configured tools, MCP servers, and account CLIs remain dependencies whose availability and permissions affect a run. Its MCP endpoint is a local, unauthenticated interface, so it is intended for trusted processes on the same machine rather than as a centrally governed enterprise service.
-
----
 
 ## How the pieces fit together
 
@@ -50,8 +46,6 @@ flowchart LR
     class O result
     class H,F decision
 ```
-
----
 
 ## What's next
 
