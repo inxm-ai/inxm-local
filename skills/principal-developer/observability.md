@@ -9,7 +9,7 @@ locally.
 ## Context: a local-first desktop app, not a hosted service
 
 `inxm-local` runs on a user's machine. There is no backend fleet, no on-call rotation,
-no SLA to page against, and (by design, see `docs/telemetry.md`) no default visibility
+no SLA to page against, and (by design, see `docs/reference/telemetry.md`) no default visibility
 into what any individual user is doing. Generic SRE playbooks built around SLOs, error
 budgets, and burn-rate alerting **do not apply here** — don't introduce them. What does
 apply, and is already built:
@@ -81,7 +81,7 @@ This is the one place data can leave the machine, and it is deliberately narrow:
   behaviour that must never regress.
 - **Exhaustive schema**: every field that can ever leave the machine is declared in
   `telemetry/schema.rs`'s `Event` enum. Adding a field there is a documentation change
-  too — `docs/telemetry.md` promises the list is complete.
+  too — `docs/reference/telemetry.md` promises the list is complete.
 - **No stable identifiers, ever**: no machine ID, no install ID, no username, no
   hostname, no IP (the receiving Cloudflare Worker discards it), no timestamps from
   the client (the sink assigns a coarse server-side one), no free-form strings from
@@ -92,7 +92,7 @@ This is the one place data can leave the machine, and it is deliberately narrow:
 When a task touches `telemetry/`, treat the schema and the privacy rules above as hard
 constraints — see `SKILL.md`'s hard rules. Any new field must be justified against
 "does this help understand aggregate product usage without identifying anyone", and
-must be added to `docs/telemetry.md` and to the Cloudflare Worker's allow-list
+must be added to `docs/reference/telemetry.md` and to the Cloudflare Worker's allow-list
 (`telemetry-worker/worker.js`) in the same change.
 
 ---
