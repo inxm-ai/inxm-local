@@ -22,7 +22,7 @@ At a high level, you begin with an intent: a description of the outcome or proce
 
 Once the plan is ready, a trigger supplies its inputs and starts a run. The deterministic executor follows the saved dependencies, calls the configured tools, and persists progress as each step completes. That gives you a live result during execution and a record you can inspect afterward. The same plan can be run again with different inputs, scheduled for repeated use, or invoked by another local client through MCP.
 
-Some workflows intentionally stop for a human approval or free-text answer. Others fail because an external tool, service, or input is unavailable. In both cases, the state is explicit: a human can resume the paused run, and a failed run can be sent back to the compiler for a repair proposal that must be reviewed and applied before the workflow changes. 
+Some workflows intentionally stop for a human approval or free-text answer. Others fail because an external tool, service, or input is unavailable. In both cases, the state is explicit: a human can resume the paused run, and a failed run can be sent back to the compiler for a repair proposal that must be reviewed and applied before the workflow changes.
 
 ```mermaid
 flowchart LR
@@ -37,18 +37,17 @@ flowchart LR
     F --> X[Repair proposal]
     X -->|apply| P
 
-    classDef input fill:#fff3d6,stroke:#b7791f,color:#3d2a0a
-    classDef control fill:#e6f4f1,stroke:#197c6b,color:#103d36
-    classDef result fill:#e8eefc,stroke:#4567a8,color:#1e2e55
-    classDef decision fill:#fce8e8,stroke:#bd4f4f,color:#521f1f
+    classDef input fill:var(--bg-raised),stroke:var(--accent),color:var(--fg-strong)
+    classDef control fill:var(--bg-surface),stroke:var(--status-info),color:var(--fg-strong)
+    classDef result fill:var(--bg-raised),stroke:var(--status-ok),color:var(--fg-strong)
+    classDef decision fill:var(--bg-surface),stroke:var(--status-error),color:var(--fg-strong)
     class I,T input
     class C,P,R,X control
     class O result
     class H,F decision
 ```
 
-## What's next
+<h2>What's next</h2>
 
-- [Understand plans, runs, and repairs in more detail](plans-and-runs.md)
+- [Understand plans, runs, and repairs in more detail](../user-guide/plans-and-runs.md)
 - [Create your first workflow](first-workflow.md)
-

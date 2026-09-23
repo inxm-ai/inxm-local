@@ -16,10 +16,9 @@ nav:
   - Getting started:
       - Install INXM Local: getting-started/install.md
       - Create your first workflow: getting-started/first-workflow.md
-      - Understand INXM: concepts/index.md
+      - Understand INXM: getting-started/understand-inxm.md
   - User guide:
-      - Plans, runs, and repairs: concepts/plans-and-runs.md
-      - Architecture: concepts/architecture.md
+      - Plans, runs, and repairs: user-guide/plans-and-runs.md
       - Run workflows from chat: user-guide/chat-workflows.md
       - Schedule workflows: user-guide/schedules.md
       - Configure tools and MCP servers: user-guide/tools.md
@@ -32,6 +31,7 @@ nav:
       - Telemetry: telemetry.md
   - Developer guide:
       - Overview: development/index.md
+      - Architecture: development/architecture.md
       - Set up the repository: development/setup.md
       - Test and validate changes: development/testing.md
       - Hermes integration: integration/hermes.md
