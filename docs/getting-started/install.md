@@ -156,5 +156,5 @@ See [Use INXM Local with coding agents](../user-guide/coding-agents.md) for the 
 
 <h2>What's next</h2>
 
-- [Create your first workflow](first-workflow.md)
-- [Configure tools and MCP servers](../user-guide/tools.md)
+- [Create your first workflow](first-workflow.md) and turn a natural-language request into a saved plan.
+- [Configure tools and MCP servers](../user-guide/tools.md) to connect that plan to useful actions.

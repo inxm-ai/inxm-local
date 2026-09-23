@@ -19,21 +19,20 @@ nav:
       - Understand INXM: getting-started/understand-inxm.md
   - User guide:
       - Plans, runs, and repairs: user-guide/plans-and-runs.md
-      - Run workflows from chat: user-guide/chat-workflows.md
-      - Schedule workflows: user-guide/schedules.md
-      - Configure tools and MCP servers: user-guide/tools.md
-      - Use INXM Local with coding agents: user-guide/coding-agents.md
-      - Troubleshoot common problems: user-guide/troubleshooting.md
+      # - Run workflows from chat: user-guide/chat-workflows.md
+      # - Schedule workflows: user-guide/schedules.md
+      # - Configure tools and MCP servers: user-guide/tools.md
+      # - Use INXM Local with coding agents: user-guide/coding-agents.md
+      # - Troubleshoot common problems: user-guide/troubleshooting.md
   - Reference:
       - Configuration: reference/configuration.md
       - Chat commands: reference/chat-commands.md
-      - Local MCP API: reference/mcp-api.md
+      # - Local MCP API: reference/mcp-api.md
       - Telemetry: telemetry.md
   - Developer guide:
-      - Overview: development/index.md
-      - Architecture: development/architecture.md
-      - Set up the repository: development/setup.md
-      - Test and validate changes: development/testing.md
+      # - Architecture: development/architecture.md
+      # - Set up the repository: development/setup.md
+      # - Test and validate changes: development/testing.md
       - Hermes integration: integration/hermes.md
       - Contributing: development/contributing.md
 
