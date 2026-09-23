@@ -186,11 +186,11 @@ register_codex() {
 }
 
 register_hermes() {
-    have hermes || { warn "Hermes CLI not found — see docs/integration/hermes.md for manual setup."; return; }
+    have hermes || { warn "Hermes CLI not found — see docs/user-guide/hermes.md for manual setup."; return; }
     if hermes mcp add "$MCP_NAME" --url "$MCP_URL"; then
         log "Hermes: registered '$MCP_NAME' -> $MCP_URL"
     else
-        warn "Hermes: 'hermes mcp add' failed — add it to ~/.hermes/config.yaml manually (see docs/integration/hermes.md)."
+        warn "Hermes: 'hermes mcp add' failed — add it to ~/.hermes/config.yaml manually (see docs/user-guide/hermes.md)."
     fi
 }
 

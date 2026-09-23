@@ -15,7 +15,7 @@ The agent does not receive a separate execution path that bypasses INXM's plan v
 
 ## Connect a coding agent
 
-The [Register coding agents section](../getting-started/install.md#register-coding-agents) lists supported installer options. For compatible clients, the installer can also add the reusable [`use-inxm-mcp` skill](https://github.com/inxm-ai/inxm-local/blob/main/skills/use-inxm-mcp/SKILL.md), which provides agent-facing guidance for using INXM Local plans and runs.
+The [Register coding agents section](../getting-started/install.md#register-coding-agents) lists supported installer options. For compatible clients, the installer can also add the reusable `use-inxm-mcp` [skill](https://github.com/inxm-ai/inxm-local/blob/main/skills/use-inxm-mcp/SKILL.md), which provides agent-facing guidance for using INXM Local plans and runs.
 
 INXM Local's default MCP endpoint is:
 

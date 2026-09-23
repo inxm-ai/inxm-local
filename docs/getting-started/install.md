@@ -148,7 +148,7 @@ The Unix flags and Windows switches below perform the same registration. Existin
 | `--roo` | `-Roo` | Roo Code | Adds the MCP server to the Roo Code settings. |
 | `--opencode` | `-OpenCode` | OpenCode | Adds the MCP server to the OpenCode configuration. |
 | `--goose` | `-Goose` | Goose | Adds the MCP server to the Goose configuration. |
-| `--hermes` | `-Hermes` | Hermes | Runs `hermes mcp add`; see the [Hermes integration guide](../integration/hermes.md). |
+| `--hermes` | `-Hermes` | Hermes | Runs `hermes mcp add`; see the [Hermes integration guide](../user-guide/hermes.md). |
 | `--pi` | `-Pi` | Pi | Installs the `use-inxm-mcp` skill; Pi has no native MCP configuration. |
 | `--zed` | `-Zed` | Zed | Adds the MCP server to Zed and installs the `use-inxm-mcp` skill. |
 

@@ -22,8 +22,9 @@ nav:
       - Run workflows from chat: user-guide/chat-workflows.md
       - Schedule workflows: user-guide/schedules.md
       - Configure tools and MCP servers: user-guide/tools.md
-      - Use INXM with coding agents: user-guide/coding-agents.md
-      - Integrate Hermes Agent: integration/hermes.md
+      - Use INXM with coding agents:
+          - Overview: user-guide/coding-agents.md
+          - Integrate Hermes Agent: user-guide/hermes.md
       - Troubleshoot common problems: user-guide/troubleshooting.md
   - Reference:
       - Configuration: reference/configuration.md
