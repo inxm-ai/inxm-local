@@ -9,6 +9,8 @@ theme:
 extra_javascript:
     - https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js
     - assets/mermaid-init.js
+extra_css:
+    - assets/mermaid.css
 nav:
   - Home: index.md
   - Getting started:
