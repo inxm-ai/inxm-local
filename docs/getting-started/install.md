@@ -60,7 +60,7 @@ Unblock-File .\inxm-local-x86_64-pc-windows-msvc-setup.exe
 | macOS/Linux | Windows | What it does |
 | --- | --- | --- |
 | `--agents` | `-Agents` | Register every supported agent detected on the machine. |
-| Individual agent flags | Matching switches | Register one or more specific coding agents; see the table above. |
+| Individual agent flags | Matching switches | Register one or more specific coding agents; see the table below. |
 | `--autostart` | Not available | Linux: start INXM Local hidden at login. |
 | `--version 0.1.0` | `-Version 0.1.0` | Pin the installation to a specific release. |
 | `--uninstall` | Windows app uninstall | Remove the app and its agent registrations. |
@@ -157,4 +157,4 @@ See [Use INXM Local with coding agents](../user-guide/coding-agents.md) for the 
 <h2>What's next</h2>
 
 - [Create your first workflow](first-workflow.md) and turn a natural-language request into a saved plan.
-- [Configure tools and MCP servers](../user-guide/tools.md) to connect that plan to useful actions.
+- [Connect coding agents](connect-coding-agents.md) to enable the agent to create and manage reusable workflow plans.
