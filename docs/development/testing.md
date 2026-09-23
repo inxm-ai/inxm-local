@@ -37,5 +37,5 @@ Set `INXM_LOCAL_DATA_DIR` to a temporary or `target/` directory when running an 
 <h2>What's next</h2>
 
 - [Set up the repository](setup.md) if you still need a working development environment.
-- [Exercise the Local MCP API](../reference/mcp-api.md) to verify client integrations.
+- [Exercise the Local MCP server](../reference/mcp-server.md) to verify client integrations.
 - [Prepare a contribution](contributing.md) once your checks are passing.

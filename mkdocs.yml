@@ -14,21 +14,21 @@ extra_css:
 nav:
   - Home: index.md
   - Getting started:
+      - Understand INXM: getting-started/understand-inxm.md
       - Install INXM Local: getting-started/install.md
       - Create your first workflow: getting-started/first-workflow.md
-      - Understand INXM: getting-started/understand-inxm.md
   - User guide:
       - Plans, runs, and repairs: user-guide/plans-and-runs.md
       - Run workflows from chat: user-guide/chat-workflows.md
       - Schedule workflows: user-guide/schedules.md
       - Configure tools and MCP servers: user-guide/tools.md
-      - Use INXM Local with coding agents: user-guide/coding-agents.md
+      - Use INXM with coding agents: user-guide/coding-agents.md
       - Integrate Hermes Agent: integration/hermes.md
       - Troubleshoot common problems: user-guide/troubleshooting.md
   - Reference:
       - Configuration: reference/configuration.md
       - Chat commands: reference/chat-commands.md
-      - Local MCP API: reference/mcp-api.md
+      - MCP server: reference/mcp-server.md
       - Telemetry: reference/telemetry.md
   - Developer guide:
       - Architecture: development/architecture.md

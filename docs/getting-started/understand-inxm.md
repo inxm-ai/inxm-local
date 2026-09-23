@@ -1,4 +1,4 @@
-# Why INXM exists and what it can do
+# Why INXM exists
 
 We at [INXM](https://www.inxm.ai/) are building a Process Execution Engine for AI workflows, which we call the Orchestrator. Its central idea is *Compiled AI*: use AI to understand intent and shape a workflow, then execute that workflow reliably, repeatably, and with a clear record of what happened. Agents reason; automation executes. Critical work needs both.
 
