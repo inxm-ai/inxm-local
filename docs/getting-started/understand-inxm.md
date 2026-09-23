@@ -49,5 +49,5 @@ flowchart LR
 
 <h2>What's next</h2>
 
-- [Understand plans, runs, and repairs in more detail](../user-guide/plans-and-runs.md)
-- [Create your first workflow](first-workflow.md)
+- [Follow a plan through its runs and repairs](../user-guide/plans-and-runs.md) to see the model in action.
+- [Create your first workflow](first-workflow.md) and experience the full execution loop.

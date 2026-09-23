@@ -40,5 +40,5 @@ LLM calls can compile plans, perform bounded `PROMPT_CALL` steps, or propose rep
 
 <h2>What's next</h2>
 
-- [Run workflows from chat](chat-workflows.md) for compiling, invoking, inspecting, and repairing plans.
-- [Schedule workflows](schedules.md) for recurring runs with captured inputs.
+- [Run a workflow from chat](chat-workflows.md) to compile, invoke, inspect, and repair a plan.
+- [Schedule a workflow](schedules.md) when you need recurring runs with captured inputs.

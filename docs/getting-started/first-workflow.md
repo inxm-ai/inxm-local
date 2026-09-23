@@ -35,6 +35,6 @@ Use `/inspect` to see the latest run, including step status, timing, outputs, an
 
 <h2>What's next</h2>
 
-- Understand [plans, runs, and repairs](../user-guide/plans-and-runs.md).
-- Learn all [chat workflow commands](../user-guide/chat-workflows.md).
-- Add a [tool or MCP server](../user-guide/tools.md).
+- [Understand plans, runs, and repairs](../user-guide/plans-and-runs.md) so you can manage the workflow after its first run.
+- [Learn the chat workflow commands](../user-guide/chat-workflows.md) to compile, inspect, and repair plans faster.
+- [Connect a tool or MCP server](../user-guide/tools.md) to extend what your workflow can do.
