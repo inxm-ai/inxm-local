@@ -96,7 +96,7 @@ Everything is inspectable: the exact event schema
 code ([`src/telemetry/sender.rs`](src/telemetry/sender.rs)), and the
 complete Cloudflare Worker sink ([`telemetry-worker/`](telemetry-worker/),
 ~90-day retention in Workers Analytics Engine). Full details:
-[`docs/telemetry.md`](docs/telemetry.md).
+[`docs/reference/telemetry.md`](docs/reference/telemetry.md).
 
 ## Contributing
 

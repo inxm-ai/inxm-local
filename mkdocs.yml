@@ -23,6 +23,7 @@ nav:
       - Schedule workflows: user-guide/schedules.md
       - Configure tools and MCP servers: user-guide/tools.md
       - Use INXM Local with coding agents: user-guide/coding-agents.md
+      - Integrate Hermes Agent: integration/hermes.md
       - Troubleshoot common problems: user-guide/troubleshooting.md
   - Reference:
       - Configuration: reference/configuration.md
@@ -33,6 +34,5 @@ nav:
       - Architecture: development/architecture.md
       - Set up the repository: development/setup.md
       - Test and validate changes: development/testing.md
-      - Hermes integration: integration/hermes.md
       - Contributing: development/contributing.md
 
