@@ -100,7 +100,7 @@ Refer to the [Supported agents](#supported-agents) section for more details on t
 
 ### 🪟 Windows
 
-Download [`install.ps1`](../../packaging/install.ps1), then run it in PowerShell. To register every supported agent already detected on your machine, use `-Agents`:
+Download [`install.ps1`](https://raw.githubusercontent.com/inxm-ai/inxm-local/main/packaging/install.ps1), then run it in PowerShell. To register every supported agent already detected on your machine, use `-Agents`:
 
 ```powershell
 .\install.ps1 -Agents
@@ -136,7 +136,7 @@ The Unix flags and Windows switches below perform the same registration. Existin
 
 | macOS/Linux flag | Windows switch | Agent | Registration |
 | --- | --- | --- | --- |
-| `--claude` | `-Claude` | Claude Code | Runs `claude mcp add` at user scope and installs the [`use-inxm-mcp` skill](../../skills/use-inxm-mcp/SKILL.md). |
+| `--claude` | `-Claude` | Claude Code | Runs `claude mcp add` at user scope and installs the [`use-inxm-mcp` skill](https://github.com/inxm-ai/inxm-local/blob/main/skills/use-inxm-mcp/SKILL.md). |
 | `--codex` | `-Codex` | Codex CLI | Adds the MCP server to the Codex configuration. |
 | `--gemini` | `-Gemini` | Gemini CLI | Adds the MCP server to the Gemini settings. |
 | `--qwen` | `-Qwen` | Qwen Code | Adds the MCP server to the Qwen settings. |
