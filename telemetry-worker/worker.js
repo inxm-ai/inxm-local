@@ -2,7 +2,7 @@
 // Analytics Engine. This is the complete receiving side: whatever is not
 // written here is not stored anywhere.
 //
-// Privacy invariants (mirrors docs/telemetry.md):
+// Privacy invariants (mirrors docs/reference/telemetry.md):
 // - only events matching the exact client schema are accepted
 // - the client IP is never read, stored, or logged
 // - no cookies, no headers persisted, no per-install identifiers

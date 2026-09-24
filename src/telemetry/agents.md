@@ -18,7 +18,7 @@ Files:
   `record_*` entry points
 
 The receiving side lives in `telemetry-worker/` at the repo root; the user
-story is documented in `docs/telemetry.md`. Keep schema, worker, and doc in
+story is documented in `docs/reference/telemetry.md`. Keep schema, worker, and doc in
 sync — the doc promises the schema is exhaustive.
 
 You own this dir only. Read other `src/` dirs for context, never edit them.

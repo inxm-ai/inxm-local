@@ -31,6 +31,8 @@ INXM Local can invoke Hermes through an allowlisted subprocess tool. Each Hermes
 
 Native `AGENT_CALL` plan steps are intentionally rejected by the current INXM runtime. A `PROMPT_CALL` is also different: it performs one tool-free model request rather than starting an autonomous Hermes agent.
 
+---
+
 ### Why use `hermes -z`?
 
 Hermes' `-z` mode is intended for scripted, one-shot use:
@@ -40,6 +42,8 @@ hermes -z "Research authentication options for this service"
 ```
 
 It runs the normal Hermes agent and tools but writes only the final response to stdout. This makes it suitable for use as an INXM subprocess tool.
+
+---
 
 ### Create one tool per Hermes profile
 
@@ -101,6 +105,8 @@ INXM Local passes subprocess inputs in two ways:
 - Positionally, after the fixed `config.args` values.
 - As `INXM_ARGS` and individual `INXM_ARG_<NAME>` environment variables.
 
+---
+
 ### Use the tools in a plan
 
 A plan can pass the result of one Hermes agent to another:
@@ -152,6 +158,8 @@ steps:
 
 When a tool returns plain text and the step declares exactly one output, INXM Local assigns that text to the declared output. The next step can therefore reference `${step.research.findings}`.
 
+---
+
 ### Use a wrapper for structured agent options
 
 The direct subprocess configuration works best when the tool has one dynamic input: `prompt`. If a workflow needs to select the profile, model, skills, working directory, or other options at runtime, use a small wrapper program instead.
@@ -190,6 +198,8 @@ http://127.0.0.1:39387/health
 ```
 
 The port can be changed under **Settings → Local MCP server** in INXM Local.
+
+---
 
 ### Add INXM Local to Hermes
 
@@ -233,6 +243,8 @@ mcp_inxm_local_inspect_run
 
 Normally you do not need to reference those generated names directly. Describe the task and tell Hermes to use INXM Local.
 
+---
+
 ### Ask Hermes to execute an existing plan
 
 Example prompt:
@@ -245,6 +257,8 @@ failures.
 
 Hermes can call `list_plans`, `show_plan`, `execute_plan`, and `inspect_run` as needed.
 
+---
+
 ### Ask Hermes to compile a plan
 
 Example prompt:
@@ -256,6 +270,8 @@ tool. Make the topic and repository root invocation inputs.
 ```
 
 The resulting plan is validated and saved by INXM Local before it can be executed.
+
+---
 
 ### Handle human-interaction steps
 
@@ -345,12 +361,16 @@ Do not expose the unauthenticated MCP endpoint directly to a LAN or the public i
 - Configure the absolute Hermes executable path in the subprocess tool.
 - On Windows, confirm the executable or command shim is available through `PATHEXT`.
 
+---
+
 ### The Hermes step times out
 
 - Increase `timeout_secs` for the catalog tool or step.
 - Reduce the Hermes profile's maximum iterations.
 - Make the prompt bounded and self-contained.
 - Ensure Hermes is not waiting for an interactive approval. Scripted workers should use a profile whose approval behavior is appropriate for unattended execution.
+
+---
 
 ### Hermes cannot connect to INXM Local
 
@@ -360,6 +380,8 @@ Do not expose the unauthenticated MCP endpoint directly to a LAN or the public i
 - Run `hermes mcp test inxm-local`.
 - Restart or reload Hermes after changing its MCP configuration.
 - If Hermes runs in WSL or a container, account for the separate loopback network.
+
+---
 
 ### Hermes does not see the INXM tools
 

@@ -1,7 +1,7 @@
 //! The exhaustive telemetry event schema.
 //!
 //! Every field that can ever leave the machine is declared in this file —
-//! `docs/telemetry.md` promises users that this list is complete, so adding
+//! `docs/reference/telemetry.md` promises users that this list is complete, so adding
 //! a field here is a documentation change too. Rules for every event:
 //!
 //! - no stable identifiers: no machine id, no install id, no user name,

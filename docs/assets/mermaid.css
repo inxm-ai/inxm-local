@@ -1,0 +1,86 @@
+.mermaid {
+  cursor: zoom-in;
+  outline: 0;
+}
+
+.mermaid:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 8px;
+  border-radius: var(--r-sm);
+}
+
+.mermaid-dialog {
+  width: min(1100px, calc(100vw - 32px));
+  max-width: none;
+  max-height: calc(100vh - 32px);
+  padding: 0;
+  color: var(--fg-primary);
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-lg);
+}
+
+.mermaid-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.mermaid-dialog__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--border-hair);
+}
+
+.mermaid-dialog__title {
+  color: var(--fg-secondary);
+  font-family: var(--font-meta);
+  font-size: 13px;
+}
+
+.mermaid-dialog__close {
+  padding: 6px 12px;
+  color: var(--fg-secondary);
+  font: inherit;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+
+.mermaid-dialog__close:hover {
+  color: var(--fg-strong);
+  border-color: var(--accent);
+}
+
+.mermaid-dialog__content {
+  max-height: calc(100vh - 105px);
+  padding: var(--sp-6);
+  overflow: auto;
+}
+
+.mermaid-dialog .mermaid {
+  min-width: max-content;
+  cursor: default;
+}
+
+.mermaid-dialog .mermaid svg {
+  display: block;
+  width: auto;
+  min-width: 100%;
+  max-width: none;
+  height: auto;
+  margin: 0 auto;
+}
+
+@media (max-width: 860px) {
+  .mermaid-dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+  }
+
+  .mermaid-dialog__content {
+    padding: var(--sp-4);
+  }
+}

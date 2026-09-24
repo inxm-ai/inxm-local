@@ -11,5 +11,5 @@ Deploy with `npx wrangler deploy` from this directory (requires a Cloudflare
 account with the `inxm.ai` zone).
 
 What the client sends, why, and how users disable it is documented in
-[`docs/telemetry.md`](../docs/telemetry.md); the sending code lives in
+[`docs/reference/telemetry.md`](../docs/reference/telemetry.md); the sending code lives in
 [`src/telemetry/`](../src/telemetry/).

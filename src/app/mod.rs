@@ -500,7 +500,7 @@ impl InxmApp {
         // One anonymous ping per desktop start, plus the batched usage
         // summary accumulated since the last start — both no-ops unless the
         // user explicitly opted in (see `crate::telemetry` and
-        // docs/telemetry.md).
+        // docs/reference/telemetry.md).
         crate::telemetry::record_app_started(
             settings.telemetry_enabled,
             crate::telemetry::Channel::Desktop,
@@ -574,7 +574,7 @@ impl InxmApp {
     /// checked: every dismissal — "Get started", "Skip for now", or a nav
     /// click — persists its current state, so opting out means unchecking
     /// it before moving on. The card is the disclosure; nothing is sent
-    /// while it is still open (see `docs/telemetry.md`).
+    /// while it is still open (see `docs/reference/telemetry.md`).
     fn dismiss_onboarding(&mut self) {
         self.settings.draft.telemetry_enabled = Some(self.onboarding_telemetry_opt_in);
         self.settings.draft.onboarding_completed = true;

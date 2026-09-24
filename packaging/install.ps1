@@ -186,10 +186,10 @@ if ($Hermes) {
         if ($LASTEXITCODE -eq 0) {
             Log "Hermes: registered '$McpName' -> $McpUrl"
         } else {
-            Write-Warning "Hermes: 'hermes mcp add' failed - add it to ~\.hermes\config.yaml manually (see docs/integration/hermes.md)."
+            Write-Warning "Hermes: 'hermes mcp add' failed - add it to ~\.hermes\config.yaml manually (see docs/user-guide/hermes.md)."
         }
     } else {
-        Write-Warning "Hermes CLI not found - see docs/integration/hermes.md for manual setup."
+        Write-Warning "Hermes CLI not found - see docs/user-guide/hermes.md for manual setup."
     }
 }
 

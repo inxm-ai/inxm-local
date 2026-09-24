@@ -1,0 +1,39 @@
+site_name: INXM // Local
+site_description: Local-first compiled-AI workflows
+site_url: https://inxm-ai.github.io/inxm-local/
+repo_url: https://github.com/inxm-ai/inxm-local
+repo_name: inxm-ai/inxm-local
+theme:
+    name: inxm
+    color_scheme: auto
+extra_javascript:
+    - https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js
+    - assets/mermaid-init.js
+extra_css:
+    - assets/mermaid.css
+nav:
+  - Home: index.md
+  - Getting started:
+      - Understand INXM: getting-started/understand-inxm.md
+      - Install INXM Local: getting-started/install.md
+      - Create your first workflow: getting-started/first-workflow.md
+  - User guide:
+      - Plans, runs, and repairs: user-guide/plans-and-runs.md
+      - Run workflows from chat: user-guide/chat-workflows.md
+      - Schedule workflows: user-guide/schedules.md
+      - Configure tools and MCP servers: user-guide/tools.md
+      - Use INXM with coding agents:
+          - Overview: user-guide/coding-agents.md
+          - Integrate Hermes Agent: user-guide/hermes.md
+      - Troubleshoot common problems: user-guide/troubleshooting.md
+  - Reference:
+      - Configuration: reference/configuration.md
+      - Chat commands: reference/chat-commands.md
+      - MCP server: reference/mcp-server.md
+      - Telemetry: reference/telemetry.md
+  - Developer guide:
+      - Architecture: development/architecture.md
+      - Set up the repository: development/setup.md
+      - Test and validate changes: development/testing.md
+      - Contributing: development/contributing.md
+
