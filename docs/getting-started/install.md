@@ -76,7 +76,7 @@ Both installer scripts are attached to each release and can be downloaded direct
 
 ## Verify the installation
 
-Open INXM Local. The app should show the chat view. Select a compiler connection under **Settings -> Compiler** before compiling a plan. If the local MCP server is enabled, its status and port are shown in the application settings.
+Open INXM Local. On a new install, complete or skip the first-run assistant to reach the chat view. Select a compiler connection under **Settings -> Compiler** before compiling a plan. If the local MCP server is enabled, its status and port are shown in the application settings.
 
 ## Register coding agents
 
@@ -157,4 +157,4 @@ See [Use INXM Local with coding agents](../user-guide/coding-agents.md) for the 
 <h2>What's next</h2>
 
 - [Create your first workflow](first-workflow.md) and turn a natural-language request into a saved plan.
-- [Connect coding agents](connect-coding-agents.md) to enable the agent to create and manage reusable workflow plans.
+- [Connect coding agents](../user-guide/coding-agents.md) to enable the agent to create and manage reusable workflow plans.

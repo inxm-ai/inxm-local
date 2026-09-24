@@ -24,7 +24,7 @@ When a plan reaches a `HUMAN_INTERACTION` step, the plan card pauses and display
 
 ## Inspect, repair, and resume
 
-Use `/inspect [run-id]` for step details. For a failed run, `/repair [run-id]` asks the compiler to propose a patch. Apply or reject the proposal with `/apply <patch-id>` or `/reject <patch-id> [reason]`. After applying a repair, `/resume <run-id>` reruns the failed step and its downstream steps against the new plan version.
+Use `/inspect [run-id]` for step details. For a failed run, `/repair [run-id]` asks the compiler to propose a patch or identify an external problem. Apply or reject a proposed patch with `/apply <patch-id>` or `/reject <patch-id> [reason]`. After applying a patch, `/resume <run-id>` reruns the failed step and its downstream steps against the new plan version. For an external problem, fix it first, then use `/resume <run-id>` with the same plan version.
 
 ## Find plans and runs
 

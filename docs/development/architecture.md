@@ -32,14 +32,14 @@ flowchart LR
 
 - The **desktop UI** renders chat, plans, runs, settings, schedules, and tools with egui.
 - The **application engine** runs asynchronous work on a Tokio runtime and bridges commands and events to the UI.
-- The **compiler** turns intent into a plan; the **validator** checks contracts before persistence or execution.
+- The **compiler** turns intent into a plan; the **validator** checks contracts when plans are compiled, imported, or patched.
 - The **executor** runs plan steps in dependency order and persists state through the storage layer.
 - The **tool catalog** supplies subprocess, HTTP, and MCP-backed operations.
 - The **local MCP server** exposes the same plan and execution operations to local clients.
 
 ## Data flow
 
-Desktop and MCP requests enter the shared engine paths. Compilation produces a validated saved plan. Execution resolves inputs, runs dependencies, writes step state, and emits progress. A failed run can be sent to the repair path, which produces a patch for explicit approval.
+Desktop and MCP requests enter the shared engine paths. Compilation produces a validated saved plan. Execution resolves inputs, runs dependencies, writes step state, and emits progress. A failed run can be sent to the repair path, which proposes either a patch for explicit approval or an external problem to fix before resuming the same plan version.
 
 ## Trust boundaries
 

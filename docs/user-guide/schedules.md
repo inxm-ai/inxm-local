@@ -30,9 +30,8 @@ A cron expression has five parts, in this order:
 minute hour day-of-month month day-of-week
 ```
 
-For example, `0 8 * * 1-5` means “at 8:00 a.m. every Monday through Friday.” The `*` means “every,” and ranges such as `1-5` select a span of values. Schedule times use your computer's local time zone.
+For example, `0 8 * * MON-FRI` means “at 8:00 a.m. every Monday through Friday.” The `*` means “every,” and ranges select a span of values. Numeric weekdays in INXM start at Sunday = 1, so `1-5` means Sunday through Thursday. Schedule times use your computer's local time zone.
 
-When in doubt, use [Crontab.guru](https://crontab.guru/) as an interactive guide: enter an expression to see in plain language, when it will run.
 
 ## Manage schedules
 
@@ -44,7 +43,7 @@ Schedules run only while an INXM Local scheduler is running. Choose how you want
 
 - **Use the desktop app:** Leave **Keep schedules running in the background** enabled in Settings (it is on by default). Closing the window hides INXM Local in the system tray; it does not quit the app. From the tray menu, you can reopen the window, pause or resume all schedules, or quit INXM Local. Pausing does not change each schedule's enabled state.
 - **Run without the desktop app:** Keep this command running in a terminal or managed process:
-	```inxm-local --headless``` or ```inxm-local INXM_HEADLESS=1```
+	`inxm-local --headless` or `INXM_HEADLESS=1 inxm-local`
 
 Only one INXM Local instance can run schedules for a data directory at a time. If no scheduler is running when a scheduled time passes, that occurrence is skipped; it will not run later as a catch-up.
 

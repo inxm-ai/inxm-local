@@ -1,6 +1,6 @@
 # Chat command reference
 
-Enter commands in the chat input. Plain text that does not begin with `/` is treated as compile intent.
+Enter commands in the chat input. Plain text starts a guided plan-creation flow in a new, empty chat, continues an active flow, or asks an insight question in an existing conversation.
 
 | Command | Behavior |
 | --- | --- |

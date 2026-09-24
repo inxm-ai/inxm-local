@@ -4,7 +4,7 @@ MCP lets compatible clients, including coding agents, use INXM Local's workflow 
 
 ## Server endpoint
 
-The application starts a loopback HTTP MCP server at `http://127.0.0.1:39387/mcp` by default. It also exposes `GET /health`, which returns a short status response. Change the port in Settings or `settings.json`.
+The application starts a loopback HTTP MCP server at `http://127.0.0.1:39387/mcp` by default. If the configured port cannot be bound, it tries an available ephemeral port; check the reported listening URL before configuring a client. It also exposes `GET /health`, which returns a short status response. Change the configured port in Settings or `settings.json`.
 
 The server accepts MCP JSON-RPC requests for `initialize`, `ping`, `tools/list`, and `tools/call`. It is unauthenticated and restricted to loopback callers and loopback Host or Origin headers.
 
@@ -21,7 +21,10 @@ The server accepts MCP JSON-RPC requests for `initialize`, `ping`, `tools/list`,
 | `execute_plan` | Execute a plan with inputs |
 | `list_runs` | List recent runs |
 | `inspect_run` | Inspect a run |
-| `repair_run` | Propose a repair patch |
+| `repair_run` | Propose a repair patch or identify an external problem |
+| `resume_run` | Resume a failed run after a repair |
+| `apply_patch` | Apply a pending repair patch |
+| `reject_patch` | Reject a pending repair patch |
 | `list_patches` | List repair patches |
 | `schedule_plan` | Create a schedule with captured inputs |
 | `list_schedules` | List schedules |

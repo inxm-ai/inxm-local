@@ -42,7 +42,7 @@ Other fields control theme, update checks, onboarding state, and Codex sandbox b
 | `INXM_FORCE_WAYLAND` | On Linux, disable the X11 preference used for tray lifecycle behavior |
 | `INXM_TELEMETRY=off` | Disable telemetry for the process; `0`, `false`, and `no` also disable it |
 | `--no-telemetry` | Disable telemetry for the process |
-| `--set-telemetry=<value>` | Set telemetry consent from the command line and exit |
+| `--set-telemetry=on` or `--set-telemetry=off` | Record a first-run telemetry choice and exit; does not overwrite a completed onboarding or installer choice |
 | `INXM_TELEMETRY_ENDPOINT` | Override the telemetry event endpoint |
 | `ANTHROPIC_API_KEY` | API-key fallback for Claude when the backend is automatic or API-backed |
 | `OPENAI_API_KEY` | API-key fallback for OpenAI when the backend is automatic or API-backed |
