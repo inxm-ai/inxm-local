@@ -33,7 +33,6 @@
 
 The [GitHub Releases page](https://github.com/inxm-ai/inxm-local/releases/latest) contains platform packages, and the [full installation guide](https://inxm-ai.github.io/inxm-local/getting-started/install/) covers manual and agent-registration installs.
 
-
 ## 🚀 Quick start
 
 Install the latest release on macOS or Linux:

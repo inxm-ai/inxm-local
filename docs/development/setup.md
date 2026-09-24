@@ -13,19 +13,19 @@ Use this path to build and run INXM Local from source.
 
 ## Build and run
 
-From the repository root:
+From the repository root, run the release build for normal use:
 
 ```sh
 cargo run --release
 ```
 
-The debug build is useful for iteration:
+Or, while developing, run the faster-to-build debug version:
 
 ```sh
 cargo run
 ```
 
-Use `INXM_LOCAL_DATA_DIR` to isolate local data from an existing installation:
+Use `INXM_LOCAL_DATA_DIR` to isolate local data from an existing installation; `target/dev-data` is relative to that directory:
 
 ```sh
 INXM_LOCAL_DATA_DIR=target/dev-data cargo run
