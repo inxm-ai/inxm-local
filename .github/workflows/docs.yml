@@ -2,6 +2,7 @@ name: Documentation
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - "docs/**"
       - "mkdocs.yml"
@@ -24,6 +25,7 @@ concurrency:
 jobs:
   build:
     name: Build Documentation
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository

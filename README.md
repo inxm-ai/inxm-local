@@ -1,21 +1,53 @@
-# INXM // local
+<div align="center">
+	<img src="assets/favlogo.png" alt="INXM logo" width="192">
+	<h1>INXM // local</h1>
+	<h3>Local-first Rust desktop app for compiled-AI workflows</h3>
+	<p><small>Option 1: Centered lead</small></p>
+	<p>
+		<strong>The LLM is the compiler, not the runtime.</strong><br>
+		Describe intent in chat. INXM compiles a typed plan; a deterministic executor runs it.<br>
+		No AI improvisation in the execution path.
+	</p>
+	<p>
+		<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache 2.0"></a>
+		<a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen" alt="contributions welcome"></a>
+		<img src="https://img.shields.io/badge/Discord-coming%20soon-5865F2?logo=discord&amp;logoColor=white" alt="Discord coming soon">
+	</p>
+</div>
 
-A local-first Rust desktop app for compiled-AI workflows.
+<p><strong>Option 2: Quote</strong></p>
+<blockquote>
+	<p><strong>The LLM is the compiler, not the runtime.</strong> Describe intent in chat;
+	the compiler produces a typed plan, and a deterministic executor runs it.
+	No AI improvisation in the execution path.</p>
+</blockquote>
 
-> The LLM is the **compiler**, not the runtime. You describe intent in chat, the compiler produces a typed plan, and a deterministic executor runs it. No AI improvisation in the execution path.
+<p><strong>Option 3: Framed callout</strong></p>
+<table align="center">
+	<tr>
+		<td align="center">
+			<strong>The LLM is the compiler, not the runtime.</strong><br>
+			Describe intent in chat &rarr; compile a typed plan &rarr; run it deterministically.<br>
+			<em>No AI improvisation in the execution path.</em>
+		</td>
+	</tr>
+</table>
 
-## What it does
+> [!NOTE]
+> 📚 Read the documentation → [Documentation](https://inxm-ai.github.io/inxm-local/)
 
-- **Chat to create plans** — type plain language and the configured LLM turns it into a validated, versioned plan. Use an API key, an existing Codex/Claude Code login, or a compatible local/hosted endpoint. Slash commands (`/run`, `/plans`, `/repair`, …) drive everything else, with an animated command palette (type `/`, Tab to complete).
-- **Plan-owned conversations** — every plan has one persistent chat. Opening a plan or one of its runs navigates to that chat instead of inserting a card into the currently open conversation. A fixed workspace card keeps plan controls, live progress, details, and complete execution history visible above the scrollable transcript.
-- **Reusable, typed plan inputs** — compiled plans declare values supplied by each trigger (for example query, target, recipient, limit, or environment). Inputs are validated, available as `${input.<name>}`, persisted with runs, and captured independently by each schedule.
-- **Deterministic runs** — the ported soloplayer executor runs steps in topological order, persists state and resolved inputs after every step, and streams live progress into the plan card.
-- **Human-in-the-loop** — `HUMAN_INTERACTION` steps pause the run and ask in chat (Approve / Reject buttons or a free-text answer).
-- **Repair loop** — a failed run can be handed back to the compiler (`/repair <run-id>`); the proposed patch appears as a card you apply or reject. Applied patches create a new plan version.
-- **MCP management in the UI** — the *MCP Tools* view lists the tool catalog and lets you add / edit / delete local stdio or remote Streamable HTTP MCP servers (plus subprocess and HTTP tools). Changes persist to `tools.yaml` in the data dir.
-- **Local HTTP MCP server** — the desktop client starts a local MCP server on launch so other clients can compile, find/show, execute, repair, edit, schedule, and inspect workflows through the same deterministic core.
+## 🌟 Features
 
-## Quick start
+- **Build plans with AI** — Describe what you want in plain language and get a validated, versioned plan. Works with API keys, Codex/Claude Code logins, and compatible local or hosted LLMs.
+- **Chat with each plan** — Every plan has its own persistent conversation, with controls, live progress, details, and execution history in one place.
+- **Define reusable inputs** — Plans accept typed, validated inputs such as queries, targets, recipients, limits, and environments via `${input.<name>}`.
+- **Run workflows deterministically** — Steps execute in topological order, with state and resolved inputs persisted after every step.
+- **Pause for human input** — `HUMAN_INTERACTION` steps can request approval, rejection, or a free-text response before continuing.
+- **Repair failed runs** — `/repair <run-id>` uses the compiler to propose a patch. Accepting it creates a new plan version.
+- **Manage MCP tools** — Add, edit, and remove local stdio, remote Streamable HTTP MCP, subprocess, and HTTP tools directly from the UI. Configuration is stored in `tools.yaml`.
+- **Expose workflows over MCP** — A built-in local HTTP MCP server lets other clients compile, find/show, run, repair, edit, schedule, and inspect workflows.
+
+## 🚀 Quick start
 
 Install the latest release on macOS or Linux:
 
@@ -41,14 +73,14 @@ curl -fsSL https://raw.githubusercontent.com/inxm-ai/inxm-local/main/packaging/i
 
 Then open INXM Local, choose a compiler connection under **Settings -> Compiler**, and describe a workflow in chat. The [first workflow tutorial](https://inxm-ai.github.io/inxm-local/getting-started/first-workflow/) walks through the complete path.
 
-## Documentation
+## 📝 Documentation
 
 - [User documentation](https://inxm-ai.github.io/inxm-local/): install, configure, run, schedule, and troubleshoot workflows.
 - [Developer documentation](https://inxm-ai.github.io/inxm-local/development/): set up the repository, understand the architecture, integrate agents, and run checks.
 
 The [GitHub Releases page](https://github.com/inxm-ai/inxm-local/releases/latest) contains platform packages, and the [full installation guide](https://inxm-ai.github.io/inxm-local/getting-started/install/) covers manual and agent-registration installs.
 
-## Telemetry (anonymous, opt-out at setup)
+## 🔌 Telemetry (anonymous, opt-out at setup)
 
 INXM Local sends two anonymous events, both only at app start — a launch ping (app version, OS name, launch mode) and a batched usage summary: plain tallies of plans created/edited and runs succeeded/failed/healed (split by app vs. MCP), the configured backend and model *name* (never a custom CLI's command or executable), the experimental-mode flag, and foreground seconds per view. No identifiers, no timestamps, no plan or user data, and no real-time tracking — counters accumulate in an inspectable local file (`telemetry-usage.json`) and are only sent on the next launch. The first-run setup screen discloses this with a pre-checked box: uncheck it there to opt out **before anything is ever sent** (nothing is collected while that screen is open). Installs that never see the setup screen — upgrades from older versions, headless/agent installs — send nothing.
 
@@ -56,7 +88,7 @@ Turn it off anytime via *Settings → Anonymous usage ping*, `"telemetry_enabled
 
 Everything is inspectable: the exact event schema ([`src/telemetry/schema.rs`](src/telemetry/schema.rs)), the only sending code ([`src/telemetry/sender.rs`](src/telemetry/sender.rs)), and the complete Cloudflare Worker sink ([`telemetry-worker/`](telemetry-worker/), ~90-day retention in Workers Analytics Engine). Full details: [`docs/reference/telemetry.md`](docs/reference/telemetry.md).
 
-## Contributing
+## 🤝 Contributing
 
 See the [contribution guide](https://inxm-ai.github.io/inxm-local/development/contributing/) for development checks, pull request requirements, and the contributor license agreement.
 
