@@ -23,6 +23,7 @@ concurrency:
 
 jobs:
   build:
+    name: Build Documentation
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -45,6 +46,7 @@ jobs:
           path: site
 
   deploy:
+    name: Deploy Documentation
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
