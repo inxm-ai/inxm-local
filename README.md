@@ -2,7 +2,6 @@
 	<img src="assets/favlogo.png" alt="INXM logo" width="192">
 	<h1>INXM // local</h1>
 	<h3>Local-first Rust desktop app for compiled-AI workflows</h3>
-	<p><small>Option 1: Centered lead</small></p>
 	<p>
 		<strong>The LLM is the compiler, not the runtime.</strong><br>
 		Describe intent in chat. INXM compiles a typed plan; a deterministic executor runs it.<br>
@@ -11,30 +10,10 @@
 	<p>
 		<a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="License: Apache 2.0"></a>
 		<a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/contributions-welcome-brightgreen" alt="contributions welcome"></a>
+		<a href="https://www.inxm.ai/oss/inxm-local"><img src="https://img.shields.io/badge/website-inxm.ai-FF5900" alt="INXM Local website"></a>
 		<img src="https://img.shields.io/badge/Discord-coming%20soon-5865F2?logo=discord&amp;logoColor=white" alt="Discord coming soon">
 	</p>
 </div>
-
-<p><strong>Option 2: Quote</strong></p>
-<blockquote>
-	<p><strong>The LLM is the compiler, not the runtime.</strong> Describe intent in chat;
-	the compiler produces a typed plan, and a deterministic executor runs it.
-	No AI improvisation in the execution path.</p>
-</blockquote>
-
-<p><strong>Option 3: Framed callout</strong></p>
-<table align="center">
-	<tr>
-		<td align="center">
-			<strong>The LLM is the compiler, not the runtime.</strong><br>
-			Describe intent in chat &rarr; compile a typed plan &rarr; run it deterministically.<br>
-			<em>No AI improvisation in the execution path.</em>
-		</td>
-	</tr>
-</table>
-
-> [!NOTE]
-> 📚 Read the documentation → [Documentation](https://inxm-ai.github.io/inxm-local/)
 
 ## 🌟 Features
 
@@ -46,6 +25,14 @@
 - **Repair failed runs** — `/repair <run-id>` uses the compiler to propose a patch. Accepting it creates a new plan version.
 - **Manage MCP tools** — Add, edit, and remove local stdio, remote Streamable HTTP MCP, subprocess, and HTTP tools directly from the UI. Configuration is stored in `tools.yaml`.
 - **Expose workflows over MCP** — A built-in local HTTP MCP server lets other clients compile, find/show, run, repair, edit, schedule, and inspect workflows.
+
+## 📝 Documentation
+
+- [User documentation](https://inxm-ai.github.io/inxm-local/): install, configure, run, schedule, and troubleshoot workflows.
+- [Developer documentation](https://inxm-ai.github.io/inxm-local/development/): set up the repository, understand the architecture, integrate agents, and run checks.
+
+The [GitHub Releases page](https://github.com/inxm-ai/inxm-local/releases/latest) contains platform packages, and the [full installation guide](https://inxm-ai.github.io/inxm-local/getting-started/install/) covers manual and agent-registration installs.
+
 
 ## 🚀 Quick start
 
@@ -72,13 +59,6 @@ curl -fsSL https://raw.githubusercontent.com/inxm-ai/inxm-local/main/packaging/i
 ```
 
 Then open INXM Local, choose a compiler connection under **Settings -> Compiler**, and describe a workflow in chat. The [first workflow tutorial](https://inxm-ai.github.io/inxm-local/getting-started/first-workflow/) walks through the complete path.
-
-## 📝 Documentation
-
-- [User documentation](https://inxm-ai.github.io/inxm-local/): install, configure, run, schedule, and troubleshoot workflows.
-- [Developer documentation](https://inxm-ai.github.io/inxm-local/development/): set up the repository, understand the architecture, integrate agents, and run checks.
-
-The [GitHub Releases page](https://github.com/inxm-ai/inxm-local/releases/latest) contains platform packages, and the [full installation guide](https://inxm-ai.github.io/inxm-local/getting-started/install/) covers manual and agent-registration installs.
 
 ## 🔌 Telemetry (anonymous, opt-out at setup)
 
