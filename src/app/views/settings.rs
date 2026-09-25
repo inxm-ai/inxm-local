@@ -751,12 +751,15 @@ pub fn show(
 
                 ui.horizontal(|ui| {
                     let checking = state.update_check == Some(UpdateCheckStatus::Checking);
+                    let up_to_date = state.update_check == Some(UpdateCheckStatus::UpToDate);
                     let check = ui
-                        .add_enabled_ui(!checking, |ui| {
+                        .add_enabled_ui(!checking && !up_to_date, |ui| {
                             widgets::ghost_button(
                                 ui,
                                 if checking {
                                     "Checking…"
+                                } else if up_to_date {
+                                    "Up to date"
                                 } else {
                                     "Check for updates"
                                 },
