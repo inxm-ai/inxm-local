@@ -1890,7 +1890,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
                         run_id,
                         accepted: true,
                     });
-                    env.emit(EngineEvent::RunFinished { run: Box::new(run) });
+                    env.emit(EngineEvent::RunFinished { run });
                 }
                 AbortOutcome::Unavailable => {
                     env.emit(EngineEvent::RunAbortResult {
@@ -3680,7 +3680,7 @@ async fn run_plan_with_timeout(
 /// to completion.
 enum AbortOutcome {
     Signalled,
-    Cleaned(Run),
+    Cleaned(Box<Run>),
     Unavailable,
 }
 
@@ -3699,7 +3699,9 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
         .values()
         .any(|step| step.status == crate::executor::StepRunStatus::Running);
     if matches!(run.status, executor::RunStatus::Running) && !has_running_step {
-        return Ok(AbortOutcome::Cleaned(mark_run_cancelled(&storage, run_id)?));
+        return Ok(AbortOutcome::Cleaned(Box::new(mark_run_cancelled(
+            &storage, run_id,
+        )?)));
     }
 
     Ok(AbortOutcome::Unavailable)
