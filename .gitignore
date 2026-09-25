@@ -4,3 +4,4 @@ target/
 backlog/
 .wrangler/
 site/
+.DS_Store
