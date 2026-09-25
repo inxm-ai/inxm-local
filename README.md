@@ -28,8 +28,8 @@
 
 ## 📝 Documentation
 
-- [User documentation](https://inxm-ai.github.io/inxm-local/): install, configure, run, schedule, and troubleshoot workflows.
-- [Developer documentation](https://inxm-ai.github.io/inxm-local/development/): set up the repository, understand the architecture, integrate agents, and run checks.
+> [!NOTE]
+> You can find the full documentation at [inxm-ai.github.io/inxm-local/](https://inxm-ai.github.io/inxm-local/)
 
 The [GitHub Releases page](https://github.com/inxm-ai/inxm-local/releases/latest) contains platform packages, and the [full installation guide](https://inxm-ai.github.io/inxm-local/getting-started/install/) covers manual and agent-registration installs.
 
