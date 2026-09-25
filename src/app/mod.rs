@@ -476,7 +476,7 @@ impl InxmApp {
             engine::spawn_with_activities(cc.egui_ctx.clone(), paths.clone(), activities.clone());
         engine.send(EngineCommand::Bootstrap);
         if settings.check_updates_on_startup {
-            engine.send(EngineCommand::CheckForUpdates);
+            engine.send(EngineCommand::CheckForUpdates { manual: false });
         }
 
         let agent_mode = agent_mode_enabled();
@@ -531,6 +531,7 @@ impl InxmApp {
             settings: SettingsState {
                 draft: settings.clone(),
                 codex_sandbox_test: None,
+                update_check: None,
             },
             mcp_status: mcp_server::ServerStatus::Starting {
                 port: settings.mcp_port,
@@ -1387,9 +1388,25 @@ impl InxmApp {
             EngineEvent::Settings(settings) => {
                 self.settings.draft = settings;
             }
-            EngineEvent::UpdateAvailable { version, url } => {
-                self.update_available = Some((version, url));
-            }
+            EngineEvent::UpdateCheckFinished { manual, result } => match result {
+                Ok(update) if manual => {
+                    self.settings.update_check = Some(if update.is_some() {
+                        settings::UpdateCheckStatus::Available
+                    } else {
+                        settings::UpdateCheckStatus::UpToDate
+                    });
+                    self.update_available = update;
+                }
+                Ok(update) if self.settings.update_check.is_none() => {
+                    self.update_available = update;
+                }
+                Ok(_) => {}
+                Err(_) if manual => {
+                    self.update_available = None;
+                    self.settings.update_check = Some(settings::UpdateCheckStatus::Failed);
+                }
+                Err(_) => {}
+            },
             EngineEvent::CodexSandboxTestResult(result) => {
                 self.settings.codex_sandbox_test = Some(result);
             }

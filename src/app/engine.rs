@@ -917,10 +917,11 @@ pub enum EngineCommand {
         run_id: Option<String>,
         plan_ref: Option<String>,
     },
-    /// Check GitHub releases for a newer version. Fails (and stays) silent on
-    /// any network/HTTP error — this is a best-effort, purely informational
-    /// check, never surfaced as a chat error.
-    CheckForUpdates,
+    /// Check GitHub releases for a newer version. Network/HTTP errors are
+    /// reported to Settings only, never surfaced as a chat error.
+    CheckForUpdates {
+        manual: bool,
+    },
     /// Probe whether Codex's OS sandbox can initialize on this host, using
     /// the draft executable path (which may not be saved yet).
     TestCodexSandbox {
@@ -1026,7 +1027,7 @@ impl EngineCommandTrace {
                 "import_plan"
             }
             EngineCommand::CreateSupportTicket { .. } => "create_support_ticket",
-            EngineCommand::CheckForUpdates => "check_for_updates",
+            EngineCommand::CheckForUpdates { .. } => "check_for_updates",
             EngineCommand::TestCodexSandbox { .. } => "test_codex_sandbox",
             EngineCommand::CheckMcpOAuthStatus { .. } => "mcp_oauth_status",
             EngineCommand::BeginMcpOAuth { .. } => "mcp_oauth_begin",
@@ -1308,12 +1309,10 @@ pub enum EngineEvent {
         report_path: String,
         message: String,
     },
-    /// A newer release than the running build is available on GitHub.
-    UpdateAvailable {
-        /// e.g. `"0.2.0"` (no leading `v`).
-        version: String,
-        /// Release page to open in the browser.
-        url: String,
+    /// Completion of an update check. `Ok(None)` means this build is current.
+    UpdateCheckFinished {
+        manual: bool,
+        result: Result<Option<(String, String)>, String>,
     },
     /// Result of an `EngineCommand::TestCodexSandbox` probe: `Ok` when
     /// Codex's OS sandbox initialized cleanly, `Err` with a remediation hint
@@ -1479,7 +1478,9 @@ pub fn spawn_with_activities(
                 while let Some(request) = cmd_rx.recv().await {
                     let trace = EngineCommandTrace::from_command(&request.command);
                     let triggered_by = match &request.command {
-                        EngineCommand::Bootstrap | EngineCommand::CheckForUpdates => "application",
+                        EngineCommand::Bootstrap | EngineCommand::CheckForUpdates { .. } => {
+                            "application"
+                        }
                         _ if request.session_id.is_some() => "human_chat",
                         _ => "human_ui",
                     };
@@ -1955,8 +1956,8 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         EngineCommand::CreateSupportTicket { run_id, plan_ref } => {
             create_support_ticket(env, run_id.as_deref(), plan_ref.as_deref())
         }
-        EngineCommand::CheckForUpdates => {
-            check_for_updates(env).await;
+        EngineCommand::CheckForUpdates { manual } => {
+            check_for_updates(env, manual).await;
             Ok(())
         }
         EngineCommand::TestCodexSandbox { executable } => {
@@ -4547,10 +4548,9 @@ const RELEASES_API_URL: &str = "https://api.github.com/repos/inxm-ai/inxm-local/
 /// missing an `html_url` for some reason.
 pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/inxm-local/releases";
 
-/// Best-effort GitHub release check. Never surfaces an error to the UI:
-/// network hiccups, rate limiting, or a malformed response all just mean
-/// "no update found this time".
-async fn check_for_updates(env: &EngineEnv) {
+/// Best-effort GitHub release check. Failures stay within Settings rather than
+/// becoming global/chat errors, but are reported so a manual check has feedback.
+async fn check_for_updates(env: &EngineEnv, manual: bool) {
     let outcome: anyhow::Result<Option<(String, String)>> = async {
         let client = reqwest::Client::builder()
             .user_agent(format!("inxm-local/{}", env!("CARGO_PKG_VERSION")))
@@ -4572,16 +4572,18 @@ async fn check_for_updates(env: &EngineEnv) {
             .and_then(|v| v.as_str())
             .unwrap_or(RELEASES_PAGE_URL)
             .to_owned();
-        Ok(is_newer_version(tag, env!("CARGO_PKG_VERSION"))
-            .then(|| (tag.trim_start_matches('v').to_owned(), url)))
+        let latest = parse_semver(tag)
+            .ok_or_else(|| anyhow::anyhow!("release response has invalid tag_name"))?;
+        let current = parse_semver(env!("CARGO_PKG_VERSION"))
+            .ok_or_else(|| anyhow::anyhow!("application version is invalid"))?;
+        Ok((latest > current).then(|| (tag.trim_start_matches('v').to_owned(), url)))
     }
     .await;
 
-    if let Ok(Some((version, url))) = outcome {
-        env.emit(EngineEvent::UpdateAvailable { version, url });
-    }
-    // Errors (network down, rate-limited, unparsable) are intentionally
-    // dropped here — this check must never surface as a chat error.
+    env.emit(EngineEvent::UpdateCheckFinished {
+        manual,
+        result: outcome.map_err(|_| "GitHub release check failed".to_owned()),
+    });
 }
 
 /// Parse a `major.minor.patch` version, tolerating a leading `v` and any
