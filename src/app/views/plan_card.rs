@@ -509,11 +509,27 @@ fn steps_graph(ui: &mut Ui, card_id: Id, plan: &Plan, run: Option<&RunBinding>) 
                 });
             }
 
-            let hide_aggregate = matches!(step.config, StepConfig::FanOut(_))
-                && run.is_some_and(|binding| fan_out_has_iteration_results(step, binding));
-            if !hide_aggregate && let Some(result) = run.and_then(|r| step_result_text(r, &step.id))
-            {
-                step_result_block(ui, row_id.with("result"), depth, &result);
+            if let Some((binding, iterations)) = run.and_then(|binding| {
+                binding
+                    .iterations
+                    .get(&step.id)
+                    .filter(|iterations| !iterations.is_empty())
+                    .map(|iterations| (binding, iterations))
+            }) {
+                iteration_result_block(
+                    ui,
+                    row_id.with("result").with(&binding.run_id),
+                    depth,
+                    iterations,
+                );
+            } else {
+                let hide_aggregate = matches!(step.config, StepConfig::FanOut(_))
+                    && run.is_some_and(|binding| fan_out_has_iteration_results(step, binding));
+                if !hide_aggregate
+                    && let Some(result) = run.and_then(|r| step_result_text(r, &step.id))
+                {
+                    step_result_block(ui, row_id.with("result"), depth, &result);
+                }
             }
         });
     }
@@ -1070,10 +1086,6 @@ const EXPANDED_RESULT_MAX_HEIGHT: f32 = 360.0;
 /// The visible result of a step: stdout when present, otherwise its named
 /// outputs rendered as `name: value` lines.
 fn step_result_text(run: &RunBinding, step_id: &str) -> Option<String> {
-    if let Some(iterations) = run.iterations.get(step_id).filter(|runs| !runs.is_empty()) {
-        return iterations.last().map(iteration_result_text);
-    }
-
     let stdout = run
         .stdouts
         .get(step_id)
@@ -1089,6 +1101,66 @@ fn step_result_text(run: &RunBinding, step_id: &str) -> Option<String> {
             (!lines.is_empty()).then(|| lines.join("\n"))
         }),
     }
+}
+
+fn iteration_result_block(ui: &mut Ui, id: Id, depth: usize, iterations: &[StepRunIteration]) {
+    let selection_id = id.with("selected_iteration");
+    let stored = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<usize>(selection_id));
+    let selected = selected_iteration_index(stored, iterations.len());
+    let mut next_selection = None;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.add_space(RESULT_INDENT.min(ui.available_width()));
+        let previous = ui
+            .add_enabled_ui(selected > 0, |ui| widgets::ghost_button(ui, "<"))
+            .inner;
+        let previous = previous.on_hover_text("Previous iteration");
+        if previous.clicked() {
+            next_selection = Some(selected - 1);
+        }
+        ui.label(
+            RichText::new(format!(
+                "Iteration {} of {}",
+                selected + 1,
+                iterations.len()
+            ))
+            .size(theme::FONT_SMALL)
+            .color(theme::text_faint()),
+        );
+        let next = ui
+            .add_enabled_ui(selected + 1 < iterations.len(), |ui| {
+                widgets::ghost_button(ui, ">")
+            })
+            .inner;
+        let next = next.on_hover_text("Next iteration");
+        if next.clicked() {
+            next_selection = Some(selected + 1);
+        }
+    });
+
+    if let Some(index) = next_selection {
+        ui.ctx().data_mut(|data| {
+            if index + 1 == iterations.len() {
+                data.remove_temp::<usize>(selection_id);
+            } else {
+                data.insert_temp(selection_id, index);
+            }
+        });
+    }
+    let display_index = next_selection.unwrap_or(selected);
+    step_result_block(
+        ui,
+        id.with(display_index),
+        depth,
+        &iteration_result_text(&iterations[display_index]),
+    );
+}
+
+fn selected_iteration_index(stored: Option<usize>, len: usize) -> usize {
+    debug_assert!(len > 0);
+    stored.filter(|index| *index < len).unwrap_or(len - 1)
 }
 
 fn iteration_result_text(run: &StepRunIteration) -> String {
@@ -1788,7 +1860,7 @@ mod tests {
     }
 
     #[test]
-    fn fan_out_items_render_only_the_latest_iteration_result() {
+    fn fan_out_items_keep_every_iteration_result_available() {
         let now = chrono::Utc::now();
         let iteration = StepRunIteration {
             iteration: 1,
@@ -1818,6 +1890,15 @@ mod tests {
             error: None,
             token_usage: None,
         };
+        assert_eq!(
+            iteration_result_text(&first_iteration),
+            "Iteration 1 · 250 ms\nsummary: first post"
+        );
+        assert_eq!(
+            iteration_result_text(&iteration),
+            "Iteration 2 · 1.2 s\nsummary: second post"
+        );
+
         let mut binding = RunBinding::default();
         binding.iterations.insert(
             "summarize_post".to_owned(),
@@ -1825,10 +1906,9 @@ mod tests {
         );
         let fan_out = fan_out_step("process_posts", &[], "extract.urls", &["summarize_post"]);
 
-        assert_eq!(
-            step_result_text(&binding, "summarize_post"),
-            Some("Iteration 2 · 1.2 s\nsummary: second post".to_owned())
-        );
+        assert_eq!(selected_iteration_index(None, 2), 1);
+        assert_eq!(selected_iteration_index(Some(0), 2), 0);
+        assert_eq!(selected_iteration_index(Some(9), 2), 1);
         assert!(fan_out_has_iteration_results(&fan_out, &binding));
     }
 
