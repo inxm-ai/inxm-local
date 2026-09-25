@@ -3642,12 +3642,11 @@ async fn run_plan_with_timeout(
                 // persisted, so there is nothing to mark cancelled.
                 return Ok(());
             };
-            let run = mark_run_cancelled(&storage, &id).map_err(|error| {
+            let run = mark_run_cancelled(&storage, &id).inspect_err(|_| {
                 env.emit(EngineEvent::RunAbortResult {
                     run_id: id.clone(),
                     accepted: false,
                 });
-                error
             })?;
             env.emit(EngineEvent::RunFinished { run: Box::new(run) });
         }
@@ -3774,13 +3773,13 @@ async fn resume_run(
     tokio::pin!(execution);
 
     enum ResumeOutcome {
-        Finished(Result<Run, crate::error::ExecutorError>),
+        Finished(Box<Result<Run, crate::error::ExecutorError>>),
         Aborted,
     }
 
     let outcome = loop {
         tokio::select! {
-            result = &mut execution => break ResumeOutcome::Finished(result),
+            result = &mut execution => break ResumeOutcome::Finished(Box::new(result)),
             Some(progress) = progress_rx.recv() => {
                 env.emit(EngineEvent::StepProgress(Box::new(progress)));
             }
@@ -3798,37 +3797,38 @@ async fn resume_run(
     }
 
     match outcome {
-        ResumeOutcome::Finished(Ok(run)) => {
-            // A resume only exists because a repair (patch or world fix)
-            // was applied first, so a successful one is a healed run — in
-            // addition to the `RunSucceeded` the emit below tallies.
-            if run.status == crate::storage::runs::RunStatus::Succeeded {
-                crate::telemetry::usage::count(
-                    &env.paths.data_dir,
-                    &env.paths.settings_path,
-                    crate::telemetry::usage::Source::App,
-                    crate::telemetry::usage::Action::RunHealed,
-                );
-            }
-            env.emit(EngineEvent::RunFinished { run: Box::new(run) });
-        }
-        ResumeOutcome::Finished(Err(error)) => {
-            // The executor persists run state before returning an error;
-            // surface the recorded run so the UI can show what happened.
-            if let Ok(run) = storage.runs().load(&run_id) {
+        ResumeOutcome::Finished(outcome) => match *outcome {
+            Ok(run) => {
+                // A resume only exists because a repair (patch or world fix)
+                // was applied first, so a successful one is a healed run — in
+                // addition to the `RunSucceeded` the emit below tallies.
+                if run.status == crate::storage::runs::RunStatus::Succeeded {
+                    crate::telemetry::usage::count(
+                        &env.paths.data_dir,
+                        &env.paths.settings_path,
+                        crate::telemetry::usage::Source::App,
+                        crate::telemetry::usage::Action::RunHealed,
+                    );
+                }
                 env.emit(EngineEvent::RunFinished { run: Box::new(run) });
             }
-            let error_str = format!("{error}");
-            let message = enhance_resume_error_message(&error_str);
-            anyhow::bail!("{}", message);
-        }
+            Err(error) => {
+                // The executor persists run state before returning an error;
+                // surface the recorded run so the UI can show what happened.
+                if let Ok(run) = storage.runs().load(&run_id) {
+                    env.emit(EngineEvent::RunFinished { run: Box::new(run) });
+                }
+                let error_str = format!("{error}");
+                let message = enhance_resume_error_message(&error_str);
+                anyhow::bail!("{}", message);
+            }
+        },
         ResumeOutcome::Aborted => {
-            let run = mark_run_cancelled(&storage, &run_id).map_err(|error| {
+            let run = mark_run_cancelled(&storage, &run_id).inspect_err(|_| {
                 env.emit(EngineEvent::RunAbortResult {
                     run_id: run_id.clone(),
                     accepted: false,
                 });
-                error
             })?;
             env.emit(EngineEvent::RunFinished { run: Box::new(run) });
         }
