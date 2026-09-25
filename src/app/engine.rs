@@ -4586,20 +4586,56 @@ async fn check_for_updates(env: &EngineEnv, manual: bool) {
     });
 }
 
-/// Parse a `major.minor.patch` version, tolerating a leading `v` and any
-/// non-numeric suffix on the patch component (e.g. `"1.2.3-beta"`).
+/// Parse a `major.minor.patch` version, tolerating a leading `v` and SemVer
+/// prerelease/build metadata (e.g. `"1.2.3-beta.1+build.4"`).
 fn parse_semver(raw: &str) -> Option<(u64, u64, u64)> {
-    let raw = raw.trim().trim_start_matches('v');
-    let mut parts = raw.splitn(3, '.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch_field = parts.next()?;
-    let patch_digits: String = patch_field
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let patch = patch_digits.parse().ok()?;
+    let raw = raw.trim();
+    let raw = raw.strip_prefix('v').unwrap_or(raw);
+    let (without_build, build) = raw
+        .split_once('+')
+        .map_or((raw, None), |(version, build)| (version, Some(build)));
+    if build.is_some_and(|metadata| !valid_semver_identifiers(metadata, false)) {
+        return None;
+    }
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(version, prerelease)| {
+            (version, Some(prerelease))
+        });
+    if prerelease.is_some_and(|metadata| !valid_semver_identifiers(metadata, true)) {
+        return None;
+    }
+    let mut parts = core.split('.');
+    let major = parse_semver_number(parts.next()?)?;
+    let minor = parse_semver_number(parts.next()?)?;
+    let patch = parse_semver_number(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
+}
+
+fn parse_semver_number(value: &str) -> Option<u64> {
+    if value.len() > 1 && value.starts_with('0') {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && !(reject_numeric_leading_zero
+                    && identifier.len() > 1
+                    && identifier.starts_with('0')
+                    && identifier
+                        .chars()
+                        .all(|character| character.is_ascii_digit()))
+        })
 }
 
 /// Whether `latest` (e.g. `"v0.2.0"`) is a newer semver than `current` (e.g.
@@ -5462,12 +5498,18 @@ mod tests {
     fn is_newer_version_tolerates_prerelease_suffixes_and_missing_v_prefix() {
         assert!(is_newer_version("0.2.0", "0.1.0"));
         assert!(is_newer_version("v0.2.0-beta", "0.1.0"));
+        assert!(is_newer_version("v0.2.0-beta.1+build.4", "0.1.0"));
     }
 
     #[test]
     fn is_newer_version_treats_unparsable_input_as_not_newer() {
         assert!(!is_newer_version("not-a-version", "0.1.0"));
         assert!(!is_newer_version("v1.2", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3.4", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3-", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3-alpha..1", "0.1.0"));
+        assert!(!is_newer_version("v01.2.3", "0.1.0"));
+        assert!(!is_newer_version("vv1.2.3", "0.1.0"));
         assert!(!is_newer_version("v1.2.3", "garbage"));
     }
 

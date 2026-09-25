@@ -532,6 +532,7 @@ impl InxmApp {
                 draft: settings.clone(),
                 codex_sandbox_test: None,
                 update_check: None,
+                update_check_cooldown_until: None,
             },
             mcp_status: mcp_server::ServerStatus::Starting {
                 port: settings.mcp_port,
@@ -1395,6 +1396,9 @@ impl InxmApp {
                     } else {
                         settings::UpdateCheckStatus::UpToDate
                     });
+                    self.settings.update_check_cooldown_until = update
+                        .is_none()
+                        .then(|| std::time::Instant::now() + std::time::Duration::from_secs(5));
                     self.update_available = update;
                 }
                 Ok(update) if self.settings.update_check.is_none() => {
@@ -1404,6 +1408,7 @@ impl InxmApp {
                 Err(_) if manual => {
                     self.update_available = None;
                     self.settings.update_check = Some(settings::UpdateCheckStatus::Failed);
+                    self.settings.update_check_cooldown_until = None;
                 }
                 Err(_) => {}
             },

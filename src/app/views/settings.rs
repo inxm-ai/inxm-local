@@ -98,6 +98,8 @@ pub struct SettingsState {
     pub codex_sandbox_test: Option<Result<(), String>>,
     /// Progress/result of the latest manual update check.
     pub update_check: Option<UpdateCheckStatus>,
+    /// Briefly prevents repeated checks after confirming this build is current.
+    pub update_check_cooldown_until: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -751,14 +753,23 @@ pub fn show(
 
                 ui.horizontal(|ui| {
                     let checking = state.update_check == Some(UpdateCheckStatus::Checking);
-                    let up_to_date = state.update_check == Some(UpdateCheckStatus::UpToDate);
+                    let now = std::time::Instant::now();
+                    let cooldown_until = state
+                        .update_check_cooldown_until
+                        .filter(|until| *until > now);
+                    let cooling_down = cooldown_until.is_some();
+                    if let Some(until) = cooldown_until {
+                        ui.ctx().request_repaint_after(until - now);
+                    } else {
+                        state.update_check_cooldown_until = None;
+                    }
                     let check = ui
-                        .add_enabled_ui(!checking && !up_to_date, |ui| {
+                        .add_enabled_ui(!checking && !cooling_down, |ui| {
                             widgets::ghost_button(
                                 ui,
                                 if checking {
                                     "Checking…"
-                                } else if up_to_date {
+                                } else if cooling_down {
                                     "Up to date"
                                 } else {
                                     "Check for updates"
@@ -770,7 +781,13 @@ pub fn show(
                         state.update_check = Some(UpdateCheckStatus::Checking);
                         engine.send(EngineCommand::CheckForUpdates { manual: true });
                     }
-                    if let Some((version, url)) = update_available {
+                    if checking {
+                        ui.label(
+                            RichText::new("Contacting GitHub…")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::text_faint()),
+                        );
+                    } else if let Some((version, url)) = update_available {
                         ui.hyperlink_to(
                             format!("v{version} available — open download page"),
                             url,
