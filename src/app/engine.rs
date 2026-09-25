@@ -917,10 +917,11 @@ pub enum EngineCommand {
         run_id: Option<String>,
         plan_ref: Option<String>,
     },
-    /// Check GitHub releases for a newer version. Fails (and stays) silent on
-    /// any network/HTTP error — this is a best-effort, purely informational
-    /// check, never surfaced as a chat error.
-    CheckForUpdates,
+    /// Check GitHub releases for a newer version. Network/HTTP errors are
+    /// reported to Settings only, never surfaced as a chat error.
+    CheckForUpdates {
+        manual: bool,
+    },
     /// Probe whether Codex's OS sandbox can initialize on this host, using
     /// the draft executable path (which may not be saved yet).
     TestCodexSandbox {
@@ -1026,7 +1027,7 @@ impl EngineCommandTrace {
                 "import_plan"
             }
             EngineCommand::CreateSupportTicket { .. } => "create_support_ticket",
-            EngineCommand::CheckForUpdates => "check_for_updates",
+            EngineCommand::CheckForUpdates { .. } => "check_for_updates",
             EngineCommand::TestCodexSandbox { .. } => "test_codex_sandbox",
             EngineCommand::CheckMcpOAuthStatus { .. } => "mcp_oauth_status",
             EngineCommand::BeginMcpOAuth { .. } => "mcp_oauth_begin",
@@ -1313,12 +1314,10 @@ pub enum EngineEvent {
         report_path: String,
         message: String,
     },
-    /// A newer release than the running build is available on GitHub.
-    UpdateAvailable {
-        /// e.g. `"0.2.0"` (no leading `v`).
-        version: String,
-        /// Release page to open in the browser.
-        url: String,
+    /// Completion of an update check. `Ok(None)` means this build is current.
+    UpdateCheckFinished {
+        manual: bool,
+        result: Result<Option<(String, String)>, String>,
     },
     /// Result of an `EngineCommand::TestCodexSandbox` probe: `Ok` when
     /// Codex's OS sandbox initialized cleanly, `Err` with a remediation hint
@@ -1484,7 +1483,9 @@ pub fn spawn_with_activities(
                 while let Some(request) = cmd_rx.recv().await {
                     let trace = EngineCommandTrace::from_command(&request.command);
                     let triggered_by = match &request.command {
-                        EngineCommand::Bootstrap | EngineCommand::CheckForUpdates => "application",
+                        EngineCommand::Bootstrap | EngineCommand::CheckForUpdates { .. } => {
+                            "application"
+                        }
                         _ if request.session_id.is_some() => "human_chat",
                         _ => "human_ui",
                     };
@@ -1988,8 +1989,8 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         EngineCommand::CreateSupportTicket { run_id, plan_ref } => {
             create_support_ticket(env, run_id.as_deref(), plan_ref.as_deref())
         }
-        EngineCommand::CheckForUpdates => {
-            check_for_updates(env).await;
+        EngineCommand::CheckForUpdates { manual } => {
+            check_for_updates(env, manual).await;
             Ok(())
         }
         EngineCommand::TestCodexSandbox { executable } => {
@@ -4707,10 +4708,9 @@ const RELEASES_API_URL: &str = "https://api.github.com/repos/inxm-ai/inxm-local/
 /// missing an `html_url` for some reason.
 pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/inxm-local/releases";
 
-/// Best-effort GitHub release check. Never surfaces an error to the UI:
-/// network hiccups, rate limiting, or a malformed response all just mean
-/// "no update found this time".
-async fn check_for_updates(env: &EngineEnv) {
+/// Best-effort GitHub release check. Failures stay within Settings rather than
+/// becoming global/chat errors, but are reported so a manual check has feedback.
+async fn check_for_updates(env: &EngineEnv, manual: bool) {
     let outcome: anyhow::Result<Option<(String, String)>> = async {
         let client = reqwest::Client::builder()
             .user_agent(format!("inxm-local/{}", env!("CARGO_PKG_VERSION")))
@@ -4732,37 +4732,76 @@ async fn check_for_updates(env: &EngineEnv) {
             .and_then(|v| v.as_str())
             .unwrap_or(RELEASES_PAGE_URL)
             .to_owned();
-        Ok(is_newer_version(tag, env!("CARGO_PKG_VERSION"))
-            .then(|| (tag.trim_start_matches('v').to_owned(), url)))
+        let latest = parse_semver(tag)
+            .ok_or_else(|| anyhow::anyhow!("release response has invalid tag_name"))?;
+        let current = parse_semver(env!("CARGO_PKG_VERSION"))
+            .ok_or_else(|| anyhow::anyhow!("application version is invalid"))?;
+        Ok((latest > current).then(|| (tag.trim_start_matches('v').to_owned(), url)))
     }
     .await;
 
-    if let Ok(Some((version, url))) = outcome {
-        env.emit(EngineEvent::UpdateAvailable { version, url });
-    }
-    // Errors (network down, rate-limited, unparsable) are intentionally
-    // dropped here — this check must never surface as a chat error.
+    env.emit(EngineEvent::UpdateCheckFinished {
+        manual,
+        result: outcome.map_err(|_| "GitHub release check failed".to_owned()),
+    });
 }
 
-/// Parse a `major.minor.patch` version, tolerating a leading `v` and any
-/// non-numeric suffix on the patch component (e.g. `"1.2.3-beta"`).
+/// Parse a `major.minor.patch` version, tolerating a leading `v` and SemVer
+/// prerelease/build metadata (e.g. `"1.2.3-beta.1+build.4"`).
 fn parse_semver(raw: &str) -> Option<(u64, u64, u64)> {
-    let raw = raw.trim().trim_start_matches('v');
-    let mut parts = raw.splitn(3, '.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch_field = parts.next()?;
-    let patch_digits: String = patch_field
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect();
-    let patch = patch_digits.parse().ok()?;
+    let raw = raw.trim();
+    let raw = raw.strip_prefix('v').unwrap_or(raw);
+    let (without_build, build) = raw
+        .split_once('+')
+        .map_or((raw, None), |(version, build)| (version, Some(build)));
+    if build.is_some_and(|metadata| !valid_semver_identifiers(metadata, false)) {
+        return None;
+    }
+    let (core, prerelease) = without_build
+        .split_once('-')
+        .map_or((without_build, None), |(version, prerelease)| {
+            (version, Some(prerelease))
+        });
+    if prerelease.is_some_and(|metadata| !valid_semver_identifiers(metadata, true)) {
+        return None;
+    }
+    let mut parts = core.split('.');
+    let major = parse_semver_number(parts.next()?)?;
+    let minor = parse_semver_number(parts.next()?)?;
+    let patch = parse_semver_number(parts.next()?)?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
+}
+
+fn parse_semver_number(value: &str) -> Option<u64> {
+    if value.len() > 1 && value.starts_with('0') {
+        return None;
+    }
+    value.parse().ok()
+}
+
+fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> bool {
+    !value.is_empty()
+        && value.split('.').all(|identifier| {
+            !identifier.is_empty()
+                && identifier
+                    .chars()
+                    .all(|character| character.is_ascii_alphanumeric() || character == '-')
+                && !(reject_numeric_leading_zero
+                    && identifier.len() > 1
+                    && identifier.starts_with('0')
+                    && identifier
+                        .chars()
+                        .all(|character| character.is_ascii_digit()))
+        })
 }
 
 /// Whether `latest` (e.g. `"v0.2.0"`) is a newer semver than `current` (e.g.
 /// `"0.1.0"`). Unparsable input on either side is treated as "not newer" so a
 /// malformed tag can never falsely trigger the update badge.
+#[cfg(test)]
 pub(crate) fn is_newer_version(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(latest), Some(current)) => latest > current,
@@ -5745,12 +5784,18 @@ mod tests {
     fn is_newer_version_tolerates_prerelease_suffixes_and_missing_v_prefix() {
         assert!(is_newer_version("0.2.0", "0.1.0"));
         assert!(is_newer_version("v0.2.0-beta", "0.1.0"));
+        assert!(is_newer_version("v0.2.0-beta.1+build.4", "0.1.0"));
     }
 
     #[test]
     fn is_newer_version_treats_unparsable_input_as_not_newer() {
         assert!(!is_newer_version("not-a-version", "0.1.0"));
         assert!(!is_newer_version("v1.2", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3.4", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3-", "0.1.0"));
+        assert!(!is_newer_version("v1.2.3-alpha..1", "0.1.0"));
+        assert!(!is_newer_version("v01.2.3", "0.1.0"));
+        assert!(!is_newer_version("vv1.2.3", "0.1.0"));
         assert!(!is_newer_version("v1.2.3", "garbage"));
     }
 

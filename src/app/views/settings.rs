@@ -96,6 +96,18 @@ pub struct SettingsState {
     pub draft: AppSettings,
     /// Result of the last "Test sandbox" probe, if one has been run this session.
     pub codex_sandbox_test: Option<Result<(), String>>,
+    /// Progress/result of the latest manual update check.
+    pub update_check: Option<UpdateCheckStatus>,
+    /// Briefly prevents repeated checks after confirming this build is current.
+    pub update_check_cooldown_until: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCheckStatus {
+    Checking,
+    UpToDate,
+    Available,
+    Failed,
 }
 
 /// The backend picker (label + one-line description per [`BackendChoice`]),
@@ -740,14 +752,54 @@ pub fn show(
                 ui.add_space(8.0);
 
                 ui.horizontal(|ui| {
-                    if widgets::ghost_button(ui, "Check for updates").clicked() {
-                        engine.send(EngineCommand::CheckForUpdates);
+                    let checking = state.update_check == Some(UpdateCheckStatus::Checking);
+                    let now = std::time::Instant::now();
+                    let cooldown_until = state
+                        .update_check_cooldown_until
+                        .filter(|until| *until > now);
+                    let cooling_down = cooldown_until.is_some();
+                    if let Some(until) = cooldown_until {
+                        ui.ctx().request_repaint_after(until - now);
+                    } else {
+                        state.update_check_cooldown_until = None;
                     }
-                    if let Some((version, url)) = update_available {
+                    let check = ui
+                        .add_enabled_ui(!checking && !cooling_down, |ui| {
+                            widgets::ghost_button(
+                                ui,
+                                if checking {
+                                    "Checking…"
+                                } else if cooling_down {
+                                    "Up to date"
+                                } else {
+                                    "Check for updates"
+                                },
+                            )
+                        })
+                        .inner;
+                    if check.clicked() {
+                        state.update_check = Some(UpdateCheckStatus::Checking);
+                        engine.send(EngineCommand::CheckForUpdates { manual: true });
+                    }
+                    if checking {
+                        ui.label(
+                            RichText::new("Contacting GitHub…")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::text_faint()),
+                        );
+                    } else if let Some((version, url)) = update_available {
                         ui.hyperlink_to(
                             format!("v{version} available — open download page"),
                             url,
                         );
+                    } else if let Some(status) = state.update_check {
+                        let (text, color) = match status {
+                            UpdateCheckStatus::Checking => ("Contacting GitHub…", theme::text_faint()),
+                            UpdateCheckStatus::UpToDate => ("You’re up to date.", theme::ok()),
+                            UpdateCheckStatus::Available => ("Update available.", theme::ok()),
+                            UpdateCheckStatus::Failed => ("Couldn’t check for updates. Try again.", theme::err()),
+                        };
+                        ui.label(RichText::new(text).size(theme::FONT_SMALL).color(color));
                     }
                 });
             });
