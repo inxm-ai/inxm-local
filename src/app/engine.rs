@@ -1878,8 +1878,27 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         } => resume_run(env, &plan_id, &run_id, inputs).await,
         EngineCommand::RejectPatch { patch_id, reason } => reject_patch(env, &patch_id, reason),
         EngineCommand::AbortRun { run_id } => {
-            let accepted = abort_run(env, &run_id).await;
-            env.emit(EngineEvent::RunAbortResult { run_id, accepted });
+            match abort_run(env, &run_id).await? {
+                AbortOutcome::Signalled => {
+                    env.emit(EngineEvent::RunAbortResult {
+                        run_id,
+                        accepted: true,
+                    });
+                }
+                AbortOutcome::Cleaned(run) => {
+                    env.emit(EngineEvent::RunAbortResult {
+                        run_id,
+                        accepted: true,
+                    });
+                    env.emit(EngineEvent::RunFinished { run: Box::new(run) });
+                }
+                AbortOutcome::Unavailable => {
+                    env.emit(EngineEvent::RunAbortResult {
+                        run_id,
+                        accepted: false,
+                    });
+                }
+            }
             Ok(())
         }
         EngineCommand::ListTools => {
@@ -3659,13 +3678,31 @@ async fn run_plan_with_timeout(
 /// the run already finished or was never found — abort is best-effort and
 /// should never surface an error to the user for a run that simply beat it
 /// to completion.
-async fn abort_run(env: &EngineEnv, run_id: &str) -> bool {
+enum AbortOutcome {
+    Signalled,
+    Cleaned(Run),
+    Unavailable,
+}
+
+async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome> {
     if let Some(cancel) = env.run_cancellations.lock().await.remove(run_id) {
         let _ = cancel.send(());
-        true
-    } else {
-        false
+        return Ok(AbortOutcome::Signalled);
     }
+
+    let storage = env.storage()?;
+    let Ok(run) = storage.runs().load(run_id) else {
+        return Ok(AbortOutcome::Unavailable);
+    };
+    let has_running_step = run
+        .step_runs
+        .values()
+        .any(|step| step.status == crate::executor::StepRunStatus::Running);
+    if matches!(run.status, executor::RunStatus::Running) && !has_running_step {
+        return Ok(AbortOutcome::Cleaned(mark_run_cancelled(&storage, run_id)?));
+    }
+
+    Ok(AbortOutcome::Unavailable)
 }
 
 fn mark_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
@@ -5056,9 +5093,36 @@ mod tests {
             .await
             .insert("active".to_owned(), cancel_tx);
 
-        assert!(abort_run(&env, "active").await);
+        assert!(matches!(
+            abort_run(&env, "active").await.unwrap(),
+            AbortOutcome::Signalled
+        ));
         assert!(cancel_rx.await.is_ok());
-        assert!(!abort_run(&env, "missing").await);
+        assert!(matches!(
+            abort_run(&env, "missing").await.unwrap(),
+            AbortOutcome::Unavailable
+        ));
+    }
+
+    #[tokio::test]
+    async fn abort_run_cleans_up_stale_running_record() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let run = Run::new("plan", 1);
+        let run_id = run.id.clone();
+        storage.runs().save(&run).unwrap();
+
+        let outcome = abort_run(&env, &run_id).await.unwrap();
+        let AbortOutcome::Cleaned(cleaned) = outcome else {
+            panic!("stale run was not cleaned up");
+        };
+        assert_eq!(cleaned.status, executor::RunStatus::Cancelled);
+        assert!(cleaned.finished_at.is_some());
+        assert_eq!(
+            storage.runs().load(&run_id).unwrap().status,
+            executor::RunStatus::Cancelled
+        );
     }
 
     #[test]

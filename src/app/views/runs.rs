@@ -356,14 +356,14 @@ fn run_row(
                                 .color(theme::warn()),
                         );
                     } else if state.abort_failed.contains(&run.id) {
-                        if widgets::danger_button(ui, "Retry abort")
-                            .on_hover_text("The run was not cancellable yet. Try again.")
-                            .clicked()
-                        {
-                            action = Some(RunsAction::Abort {
-                                run_id: run.id.clone(),
-                            });
-                        }
+                        ui.label(
+                            RichText::new("Abort unavailable")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::err()),
+                        )
+                        .on_hover_text(
+                            "This run still has work executing outside this app process.",
+                        );
                     } else if widgets::danger_button(ui, "Abort").clicked() {
                         action = Some(RunsAction::Abort {
                             run_id: run.id.clone(),
