@@ -1671,9 +1671,14 @@ struct EngineEnv {
     /// Per-run abort signals, keyed by run id once it is known (see
     /// `run_plan_with_timeout`). Firing the sender drops the run's
     /// execution future; the run is then persisted as `RunStatus::Cancelled`.
-    run_cancellations: Arc<tokio::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
+    run_cancellations: Arc<tokio::sync::Mutex<HashMap<String, RunCancellation>>>,
     activities: ActivityRegistry,
     activity_id: Option<u64>,
+}
+
+enum RunCancellation {
+    Active(tokio::sync::oneshot::Sender<()>),
+    Cancelling,
 }
 
 impl EngineEnv {
@@ -3598,7 +3603,9 @@ async fn run_plan_with_timeout(
 
     let outcome = loop {
         tokio::select! {
+            biased;
             result = &mut execution => break RunLoopOutcome::Finished(Box::new(result)),
+            _ = &mut cancel_rx => break RunLoopOutcome::Aborted,
             Some(progress) = progress_rx.recv() => {
                 if !announced {
                     announced = true;
@@ -3607,7 +3614,7 @@ async fn run_plan_with_timeout(
                         env.run_cancellations
                             .lock()
                             .await
-                            .insert(progress.run_id.clone(), tx);
+                            .insert(progress.run_id.clone(), RunCancellation::Active(tx));
                     }
                     env.emit(EngineEvent::RunStarted {
                         run_id: progress.run_id.clone(),
@@ -3621,11 +3628,12 @@ async fn run_plan_with_timeout(
                 let for_run = run_id.clone().unwrap_or_default();
                 env.emit(EngineEvent::HumanNeeded { run_id: for_run, request });
             }
-            _ = &mut cancel_rx => break RunLoopOutcome::Aborted,
         }
     };
 
-    if let Some(id) = &run_id {
+    if matches!(&outcome, RunLoopOutcome::Finished(_))
+        && let Some(id) = &run_id
+    {
         env.run_cancellations.lock().await.remove(id);
     }
 
@@ -3661,7 +3669,9 @@ async fn run_plan_with_timeout(
                 // persisted, so there is nothing to mark cancelled.
                 return Ok(());
             };
-            let run = mark_run_cancelled(&storage, &id).inspect_err(|_| {
+            let cancelled = mark_run_cancelled(&storage, &id);
+            env.run_cancellations.lock().await.remove(&id);
+            let run = cancelled.inspect_err(|_| {
                 env.emit(EngineEvent::RunAbortResult {
                     run_id: id.clone(),
                     accepted: false,
@@ -3685,9 +3695,27 @@ enum AbortOutcome {
 }
 
 async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome> {
-    if let Some(cancel) = env.run_cancellations.lock().await.remove(run_id) {
-        let _ = cancel.send(());
-        return Ok(AbortOutcome::Signalled);
+    let mut receiver_gone = false;
+    let cancel = {
+        let mut cancellations = env.run_cancellations.lock().await;
+        match cancellations.remove(run_id) {
+            Some(RunCancellation::Active(cancel)) => {
+                cancellations.insert(run_id.to_owned(), RunCancellation::Cancelling);
+                Some(cancel)
+            }
+            Some(RunCancellation::Cancelling) => {
+                cancellations.insert(run_id.to_owned(), RunCancellation::Cancelling);
+                return Ok(AbortOutcome::Signalled);
+            }
+            None => None,
+        }
+    };
+    if let Some(cancel) = cancel {
+        if cancel.send(()).is_ok() {
+            return Ok(AbortOutcome::Signalled);
+        }
+        env.run_cancellations.lock().await.remove(run_id);
+        receiver_gone = true;
     }
 
     let storage = env.storage()?;
@@ -3698,7 +3726,7 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
         .step_runs
         .values()
         .any(|step| step.status == crate::executor::StepRunStatus::Running);
-    if matches!(run.status, executor::RunStatus::Running) && !has_running_step {
+    if matches!(run.status, executor::RunStatus::Running) && (receiver_gone || !has_running_step) {
         return Ok(AbortOutcome::Cleaned(Box::new(mark_run_cancelled(
             &storage, run_id,
         )?)));
@@ -3708,12 +3736,33 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
 }
 
 fn mark_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
+    mark_run_cancelled_inner(storage, run_id, false)
+}
+
+fn mark_resumed_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
+    mark_run_cancelled_inner(storage, run_id, true)
+}
+
+fn mark_run_cancelled_inner(
+    storage: &StorageRoot,
+    run_id: &str,
+    cancel_failed: bool,
+) -> anyhow::Result<Run> {
     let mut run = storage.runs().load(run_id)?;
+    if matches!(
+        run.status,
+        executor::RunStatus::Succeeded | executor::RunStatus::Cancelled
+    ) || (!cancel_failed && matches!(run.status, executor::RunStatus::Failed { .. }))
+    {
+        return Ok(run);
+    }
     let finished_at = chrono::Utc::now();
     for step_run in run.step_runs.values_mut() {
         if matches!(
             step_run.status,
-            crate::executor::StepRunStatus::Pending | crate::executor::StepRunStatus::Running
+            crate::executor::StepRunStatus::Pending
+                | crate::executor::StepRunStatus::Running
+                | crate::executor::StepRunStatus::WaitingForHuman
         ) {
             step_run.status = crate::executor::StepRunStatus::Cancelled;
             step_run.finished_at = Some(finished_at);
@@ -3795,9 +3844,28 @@ async fn resume_run(
         if cancellations.contains_key(&run_id) {
             anyhow::bail!("run '{}' is already executing", run_id);
         }
-        cancellations.insert(run_id.clone(), cancel_tx);
+        cancellations.insert(run_id.clone(), RunCancellation::Active(cancel_tx));
     }
     tokio::pin!(cancel_rx);
+
+    // A concurrent resume may have loaded the same failed record before this
+    // command reserved the registry slot. Re-read after reservation so a
+    // cancellation that just completed cannot be resumed from stale state.
+    let run = match storage.runs().load(&run_id) {
+        Ok(run) if run.status.is_failed() => run,
+        Ok(run) => {
+            env.run_cancellations.lock().await.remove(&run_id);
+            anyhow::bail!(
+                "run '{}' has not failed (status: {}); nothing to resume",
+                run.id,
+                run.status
+            );
+        }
+        Err(error) => {
+            env.run_cancellations.lock().await.remove(&run_id);
+            return Err(error.into());
+        }
+    };
 
     // The run id is already known (this continues an existing run rather
     // than minting one), so — unlike `run_plan` — there is no need to wait
@@ -3818,17 +3886,20 @@ async fn resume_run(
 
     let outcome = loop {
         tokio::select! {
+            biased;
             result = &mut execution => break ResumeOutcome::Finished(Box::new(result)),
+            _ = &mut cancel_rx => break ResumeOutcome::Aborted,
             Some(progress) = progress_rx.recv() => {
                 env.emit(EngineEvent::StepProgress(Box::new(progress)));
             }
             Some(request) = human_rx.recv() => {
                 env.emit(EngineEvent::HumanNeeded { run_id: run_id.clone(), request });
             }
-            _ = &mut cancel_rx => break ResumeOutcome::Aborted,
         }
     };
-    env.run_cancellations.lock().await.remove(&run_id);
+    if matches!(&outcome, ResumeOutcome::Finished(_)) {
+        env.run_cancellations.lock().await.remove(&run_id);
+    }
 
     // Drain any progress that raced with completion.
     while let Ok(progress) = progress_rx.try_recv() {
@@ -3863,7 +3934,9 @@ async fn resume_run(
             }
         },
         ResumeOutcome::Aborted => {
-            let run = mark_run_cancelled(&storage, &run_id).inspect_err(|_| {
+            let cancelled = mark_resumed_run_cancelled(&storage, &run_id);
+            env.run_cancellations.lock().await.remove(&run_id);
+            let run = cancelled.inspect_err(|_| {
                 env.emit(EngineEvent::RunAbortResult {
                     run_id: run_id.clone(),
                     accepted: false,
@@ -5093,11 +5166,15 @@ mod tests {
         env.run_cancellations
             .lock()
             .await
-            .insert("active".to_owned(), cancel_tx);
+            .insert("active".to_owned(), RunCancellation::Active(cancel_tx));
 
         assert!(matches!(
             abort_run(&env, "active").await.unwrap(),
             AbortOutcome::Signalled
+        ));
+        assert!(matches!(
+            env.run_cancellations.lock().await.get("active"),
+            Some(RunCancellation::Cancelling)
         ));
         assert!(cancel_rx.await.is_ok());
         assert!(matches!(
@@ -5125,6 +5202,86 @@ mod tests {
             storage.runs().load(&run_id).unwrap().status,
             executor::RunStatus::Cancelled
         );
+    }
+
+    #[tokio::test]
+    async fn abort_run_cleans_up_when_registered_receiver_is_gone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let run = Run::new("plan", 1);
+        let run_id = run.id.clone();
+        storage.runs().save(&run).unwrap();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+        drop(cancel_rx);
+        env.run_cancellations
+            .lock()
+            .await
+            .insert(run_id.clone(), RunCancellation::Active(cancel_tx));
+
+        assert!(matches!(
+            abort_run(&env, &run_id).await.unwrap(),
+            AbortOutcome::Cleaned(_)
+        ));
+        assert!(!env.run_cancellations.lock().await.contains_key(&run_id));
+    }
+
+    #[test]
+    fn cancellation_does_not_overwrite_terminal_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageRoot::open(tmp.path()).unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::Succeeded;
+        let run_id = run.id.clone();
+        storage.runs().save(&run).unwrap();
+
+        let unchanged = mark_run_cancelled(&storage, &run_id).unwrap();
+
+        assert_eq!(unchanged.status, executor::RunStatus::Succeeded);
+        assert_eq!(
+            storage.runs().load(&run_id).unwrap().status,
+            executor::RunStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn cancellation_can_finish_a_run_waiting_for_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageRoot::open(tmp.path()).unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::WaitingForHuman {
+            step_id: "approve".to_owned(),
+        };
+        let mut step = crate::storage::runs::StepRun::new("approve");
+        step.status = crate::storage::runs::StepRunStatus::WaitingForHuman;
+        run.step_runs.insert("approve".to_owned(), step);
+        let run_id = run.id.clone();
+        storage.runs().save(&run).unwrap();
+
+        let cancelled = mark_run_cancelled(&storage, &run_id).unwrap();
+
+        assert_eq!(cancelled.status, executor::RunStatus::Cancelled);
+        assert_eq!(
+            cancelled.step_runs["approve"].status,
+            crate::storage::runs::StepRunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn resumed_cancellation_can_replace_the_original_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageRoot::open(tmp.path()).unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "old failure".to_owned(),
+        };
+        let run_id = run.id.clone();
+        storage.runs().save(&run).unwrap();
+
+        let cancelled = mark_resumed_run_cancelled(&storage, &run_id).unwrap();
+
+        assert_eq!(cancelled.status, executor::RunStatus::Cancelled);
     }
 
     #[test]
