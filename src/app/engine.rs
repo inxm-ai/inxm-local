@@ -4605,6 +4605,7 @@ fn parse_semver(raw: &str) -> Option<(u64, u64, u64)> {
 /// Whether `latest` (e.g. `"v0.2.0"`) is a newer semver than `current` (e.g.
 /// `"0.1.0"`). Unparsable input on either side is treated as "not newer" so a
 /// malformed tag can never falsely trigger the update badge.
+#[cfg(test)]
 pub(crate) fn is_newer_version(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(latest), Some(current)) => latest > current,
