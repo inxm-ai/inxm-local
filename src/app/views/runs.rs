@@ -40,6 +40,10 @@ pub struct RunsState {
     pub source_filter: Option<RunSource>,
     /// Agent mode's read-only inspector, intentionally separate from chats.
     pub inspected: Option<Box<crate::executor::Run>>,
+    /// Runs for which the engine has not yet confirmed cancellation.
+    pub aborting: std::collections::HashSet<String>,
+    /// Running rows that could not be matched to a live execution in this process.
+    pub abort_failed: std::collections::HashSet<String>,
 }
 
 /// Actions the shell must react to (navigation / engine commands).
@@ -138,7 +142,11 @@ pub fn show(
                 header_row(ui);
                 let now = chrono::Utc::now();
                 for run in &visible {
-                    if let Some(row_action) = run_row(ui, run, now, agent_mode) {
+                    if let Some(row_action) = run_row(ui, run, now, agent_mode, state) {
+                        if let RunsAction::Abort { run_id } = &row_action {
+                            state.abort_failed.remove(run_id);
+                            state.aborting.insert(run_id.clone());
+                        }
                         action = Some(row_action);
                     }
                 }
@@ -270,6 +278,7 @@ fn run_row(
     run: &RunListItem,
     now: chrono::DateTime<chrono::Utc>,
     agent_mode: bool,
+    state: &RunsState,
 ) -> Option<RunsAction> {
     let mut action = None;
     let running = matches!(run.status, RunStatus::Running);
@@ -339,10 +348,27 @@ fn run_row(
                         },
                     });
                 }
-                if running && widgets::danger_button(ui, "Abort").clicked() {
-                    action = Some(RunsAction::Abort {
-                        run_id: run.id.clone(),
-                    });
+                if running {
+                    if state.aborting.contains(&run.id) {
+                        ui.label(
+                            RichText::new("Aborting…")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::warn()),
+                        );
+                    } else if state.abort_failed.contains(&run.id) {
+                        ui.label(
+                            RichText::new("Abort unavailable")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::err()),
+                        )
+                        .on_hover_text(
+                            "This run still has work executing outside this app process.",
+                        );
+                    } else if widgets::danger_button(ui, "Abort").clicked() {
+                        action = Some(RunsAction::Abort {
+                            run_id: run.id.clone(),
+                        });
+                    }
                 }
                 ui.scope(|ui| {
                     ui.set_width(COL_DURATION);
@@ -644,7 +670,7 @@ mod tests {
             status_filter: StatusFilter::Succeeded,
             plan_filter: Some("a".to_owned()),
             source_filter: Some(RunSource::Mcp),
-            inspected: None,
+            ..Default::default()
         };
         let visible = visible_runs(&runs, &state);
         assert_eq!(

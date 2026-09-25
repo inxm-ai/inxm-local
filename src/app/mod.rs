@@ -1229,6 +1229,8 @@ impl InxmApp {
                 plan,
                 inputs,
             } => {
+                self.runs_view.aborting.remove(&run_id);
+                self.runs_view.abort_failed.remove(&run_id);
                 self.chat.push(
                     Role::Assistant,
                     MessageBody::RunStarted {
@@ -1266,6 +1268,8 @@ impl InxmApp {
                 }
             }
             EngineEvent::RunFinished { run } => {
+                self.runs_view.aborting.remove(&run.id);
+                self.runs_view.abort_failed.remove(&run.id);
                 self.chat.apply_finished_run(&run);
                 let summary = chat::run_summary_text(&run);
                 let body = if run.status.is_failed() {
@@ -1282,6 +1286,13 @@ impl InxmApp {
                 };
                 self.chat.push(Role::Assistant, body);
                 self.engine.send(EngineCommand::ListRuns);
+            }
+            EngineEvent::RunAbortResult { run_id, accepted } => {
+                if !accepted {
+                    self.runs_view.aborting.remove(&run_id);
+                    self.runs_view.abort_failed.insert(run_id);
+                    self.engine.send(EngineCommand::ListRuns);
+                }
             }
             EngineEvent::RunList(items) => {
                 if self.chat.expect_run_index {
