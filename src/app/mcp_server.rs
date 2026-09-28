@@ -746,12 +746,9 @@ fn catalog(state: &McpState) -> anyhow::Result<ToolCatalog> {
         .mutations
         .run_named("catalog.seed", "mcp_client", || {
             if !state.paths.catalog_path.exists() {
-                if let Some(parent) = state.paths.catalog_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(&state.paths.catalog_path, engine::default_catalog_yaml())?;
+                engine::seed_catalog(&state.paths.catalog_path)?;
             }
-            Ok(ToolCatalog::load_from_file(&state.paths.catalog_path)?)
+            state.paths.valid_catalog()
         })
 }
 
