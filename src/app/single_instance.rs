@@ -57,10 +57,12 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 
-use interprocess::local_socket::prelude::*;
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-use interprocess::local_socket::{GenericFilePath, ToFsName as _};
-use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
+use interprocess::local_socket::GenericFilePath;
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use interprocess::local_socket::GenericNamespaced;
+use interprocess::local_socket::ListenerOptions;
+use interprocess::local_socket::prelude::*;
 
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, HANDLE};
