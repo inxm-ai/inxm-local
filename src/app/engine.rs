@@ -238,6 +238,7 @@ pub struct DataPaths {
     /// Shared by every adapter created from these paths so persistent
     /// read-modify-write operations have one owner inside this process.
     pub mutations: super::mutation::MutationBoundary,
+    catalog_cache: Arc<std::sync::Mutex<Option<ToolCatalog>>>,
 }
 
 /// Explicit policy for an imported plan whose name already exists locally.
@@ -249,7 +250,6 @@ pub enum ImportConflictPolicy {
     NewVersion,
     Duplicate,
 }
-
 /// What the collision resolver did. Returned to MCP callers so a client never
 /// has to infer a destructive choice from a plan id alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -297,6 +297,24 @@ impl DataPaths {
             schedules_path,
             scheduler_lock_path,
             mutations: super::mutation::MutationBoundary::default(),
+            catalog_cache: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    pub(crate) fn valid_catalog(&self) -> anyhow::Result<ToolCatalog> {
+        if !self.catalog_path.exists() {
+            return Ok(ToolCatalog::default());
+        }
+        match crate::tools::catalog::CatalogSnapshot::load_from_file(&self.catalog_path) {
+            Ok(snapshot) => {
+                *self.catalog_cache.lock().unwrap() = Some(snapshot.catalog.clone());
+                Ok(snapshot.catalog)
+            }
+            Err(error) => {
+                self.catalog_cache.lock().unwrap().clone().ok_or_else(|| {
+                    anyhow::anyhow!("catalog {}: {error}", self.catalog_path.display())
+                })
+            }
         }
     }
 }
@@ -863,6 +881,12 @@ pub enum EngineCommand {
     DeleteTool {
         name: String,
     },
+    RemoveQuarantinedTool {
+        position: usize,
+        /// The entry the user confirmed; removal refuses if the file changed underneath.
+        raw: serde_yaml::Value,
+    },
+    RestoreCatalog,
     /// "Describe what you need" — ask the compiler backend to invent a
     /// starting `ToolEntry` from a free-text description, so the user can
     /// review/adjust it in the manual editor rather than filling in raw
@@ -1015,6 +1039,8 @@ impl EngineCommandTrace {
             EngineCommand::SaveTool { .. } => "save_tool",
             EngineCommand::RenameTool { .. } => "rename_tool",
             EngineCommand::DeleteTool { .. } => "delete_tool",
+            EngineCommand::RemoveQuarantinedTool { .. } => "remove_quarantined_tool",
+            EngineCommand::RestoreCatalog => "restore_catalog",
             EngineCommand::SynthesizeTool { .. } => "synthesize_tool",
             EngineCommand::SaveSettings { .. } => "save_settings",
             EngineCommand::ListSchedules => "list_schedules",
@@ -1283,6 +1309,26 @@ pub enum EngineEvent {
         message: String,
     },
     Catalog(Vec<ToolEntry>),
+    CatalogDiagnostics(Vec<crate::tools::catalog::CatalogDiagnostic>),
+    CatalogRecoveryRequired {
+        path: String,
+        error: String,
+        /// The file holds no tool entries, so replacing it loses nothing.
+        empty: bool,
+    },
+    /// A tool save, rename, or bulk import failed; shown in the MCP editor rather than chat.
+    CatalogMutationFailed(String),
+    /// A single tool save or rename was persisted.
+    ToolSaved {
+        name: String,
+    },
+    CatalogRestored {
+        backup: String,
+    },
+    CatalogImportSummary {
+        imported: usize,
+        unavailable: usize,
+    },
     /// A tool definition generated from a free-text "describe what you
     /// need" request, ready to be reviewed in the manual editor.
     ToolSynthesized {
@@ -1528,7 +1574,10 @@ pub fn spawn_with_activities(
                                 outcome = "failure",
                                 "engine command completed"
                             );
-                            env.emit(EngineEvent::Failure(format!("{error:#}")));
+                            env.emit(command_failure_event(
+                                trace.command_kind,
+                                format!("{error:#}"),
+                            ));
                         } else {
                             tracing::info!(
                                 command_kind = trace.command_kind,
@@ -1771,10 +1820,24 @@ impl EngineEnv {
     }
 
     fn catalog(&self) -> anyhow::Result<ToolCatalog> {
+        self.paths.valid_catalog()
+    }
+
+    fn catalog_snapshot(&self) -> anyhow::Result<crate::tools::catalog::CatalogSnapshot> {
+        self.load_catalog_snapshot().map_err(|error| {
+            anyhow::anyhow!("catalog {}: {error}", self.paths.catalog_path.display())
+        })
+    }
+
+    /// Like [`Self::catalog_snapshot`], but the error does not repeat the catalog path, for
+    /// surfaces that show the path on their own.
+    fn load_catalog_snapshot(
+        &self,
+    ) -> Result<crate::tools::catalog::CatalogSnapshot, crate::error::ToolError> {
         if self.paths.catalog_path.exists() {
-            Ok(ToolCatalog::load_from_file(&self.paths.catalog_path)?)
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&self.paths.catalog_path)
         } else {
-            Ok(ToolCatalog::default())
+            crate::tools::catalog::CatalogSnapshot::load_from_yaml("tools: []\n")
         }
     }
 }
@@ -1908,13 +1971,58 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
             Ok(())
         }
         EngineCommand::ListTools => {
-            let catalog = env.catalog()?;
-            env.emit(EngineEvent::Catalog(catalog.all().cloned().collect()));
+            announce_catalog(env);
             Ok(())
         }
         EngineCommand::SaveTool { entry } => save_tool(env, *entry),
         EngineCommand::RenameTool { old_name, entry } => rename_tool(env, &old_name, *entry),
         EngineCommand::DeleteTool { name } => delete_tool(env, &name),
+        EngineCommand::RemoveQuarantinedTool { position, raw } => {
+            env.paths.mutations.run_named(
+                "catalog.remove_quarantined",
+                env.triggered_by(),
+                || {
+                    let mut snapshot = env.catalog_snapshot()?;
+                    if !snapshot
+                        .diagnostics
+                        .iter()
+                        .any(|item| item.position == position && item.raw == raw)
+                    {
+                        anyhow::bail!(
+                            "the unavailable catalog entry changed since it was shown; review it again"
+                        );
+                    }
+                    if !snapshot.remove_quarantined(position) {
+                        anyhow::bail!("no unavailable catalog entry at position {position}");
+                    }
+                    snapshot.save_to_file(&env.paths.catalog_path)?;
+                    Ok(())
+                },
+            )?;
+            announce_catalog(env);
+            Ok(())
+        }
+        EngineCommand::RestoreCatalog => {
+            let result =
+                env.paths
+                    .mutations
+                    .run_named("catalog.restore", env.triggered_by(), || {
+                        Ok(crate::tools::catalog::CatalogSnapshot::restore_starter(
+                            &env.paths.catalog_path,
+                            &default_catalog_yaml(),
+                        )?)
+                    });
+            match result {
+                Ok(backup) => {
+                    env.emit(EngineEvent::CatalogRestored {
+                        backup: backup.display().to_string(),
+                    });
+                    announce_catalog(env);
+                }
+                Err(error) => env.emit(catalog_recovery_event(env, error.to_string())),
+            }
+            Ok(())
+        }
         EngineCommand::SynthesizeTool { description } => synthesize_tool(env, description).await,
         EngineCommand::SaveSettings { settings } => save_settings(env, *settings),
         EngineCommand::ListPatches => {
@@ -2131,26 +2239,42 @@ async fn list_mcp_server_tools(env: &EngineEnv, transport: McpTransport) -> anyh
 }
 
 fn bulk_save_tools(env: &EngineEnv, entries: Vec<ToolEntry>) -> anyhow::Result<()> {
-    let updated =
+    let (imported, unavailable) =
         env.paths
             .mutations
             .run_named("catalog.bulk_save_tools", env.triggered_by(), || {
-                let catalog = env.catalog()?;
-                let mut merged: Vec<ToolEntry> = catalog.all().cloned().collect();
+                let mut updated = env.catalog_snapshot()?;
+                let mut imported = 0;
+                let mut unavailable = 0;
                 for entry in entries {
                     if entry.name.trim().is_empty() {
                         anyhow::bail!("tool name must not be empty");
                     }
-                    match merged.iter_mut().find(|tool| tool.name == entry.name) {
-                        Some(existing) => *existing = entry,
-                        None => merged.push(entry),
+                    let raw = serde_yaml::to_value(&entry)?;
+                    if updated.diagnostics.iter().any(|item| item.raw == raw) {
+                        // Re-importing the same rejected definition keeps the existing entry.
+                        unavailable += 1;
+                    } else if updated.catalog.contains(&entry.name) {
+                        if updated.upsert(entry).is_err() {
+                            let _ = updated.import(raw);
+                            unavailable += 1;
+                        } else {
+                            imported += 1;
+                        }
+                    } else if updated.import(raw).is_ok() {
+                        imported += 1;
+                    } else {
+                        unavailable += 1;
                     }
                 }
-                let updated = ToolCatalog::new(merged);
                 updated.save_to_file(&env.paths.catalog_path)?;
-                Ok(updated)
+                Ok((imported, unavailable))
             })?;
-    env.emit(EngineEvent::Catalog(updated.all().cloned().collect()));
+    env.emit(EngineEvent::CatalogImportSummary {
+        imported,
+        unavailable,
+    });
+    announce_catalog(env);
     Ok(())
 }
 
@@ -2717,28 +2841,31 @@ fn bootstrap(env: &EngineEnv) -> anyhow::Result<()> {
             // Ensure storage exists and seed a starter catalog on first launch.
             let _ = env.storage()?;
             if !env.paths.catalog_path.exists() {
-                std::fs::write(&env.paths.catalog_path, default_catalog_yaml())?;
+                seed_catalog(&env.paths.catalog_path)?;
             }
 
             // Older Windows catalogs route echo through cmd.exe, whose redirected
             // output uses a legacy code page. Migrate known seeded configurations
             // to a PowerShell command that emits UTF-8 without interpolating input.
             if cfg!(windows)
+                && env.catalog_snapshot().is_ok()
                 && let Some(migrated) = legacy_echo_to_utf8_migration(&env.catalog()?)
             {
-                migrated.save_to_file(&env.paths.catalog_path)?;
+                persist_catalog_updates(env, &migrated)?;
             }
 
             // Older catalogs also predate the native HTTP adapter. Add a generic
             // GET tool so planners do not need to guess whether curl exists.
-            if let Some(migrated) = add_native_http_get_migration(&env.catalog()?) {
-                migrated.save_to_file(&env.paths.catalog_path)?;
-            }
+            if env.catalog_snapshot().is_ok() {
+                if let Some(migrated) = add_native_http_get_migration(&env.catalog()?) {
+                    persist_catalog_updates(env, &migrated)?;
+                }
 
-            // Catalogs seeded before the `mcp<2` pin launch their uvx servers
-            // against the 1.x-era APIs of a 2.x client and crash on import.
-            if let Some(migrated) = add_mcp_v1_constraint_migration(&env.catalog()?) {
-                migrated.save_to_file(&env.paths.catalog_path)?;
+                // Catalogs seeded before the `mcp<2` pin launch their uvx servers
+                // against the 1.x-era APIs of a 2.x client and crash on import.
+                if let Some(migrated) = add_mcp_v1_constraint_migration(&env.catalog()?) {
+                    persist_catalog_updates(env, &migrated)?;
+                }
             }
             Ok(())
         })?;
@@ -2752,9 +2879,70 @@ fn bootstrap(env: &EngineEnv) -> anyhow::Result<()> {
     env.emit(EngineEvent::Settings(settings));
     env.emit(EngineEvent::PlanList(list_plans(env)?));
     env.emit(EngineEvent::RunList(list_runs(env)?));
-    let catalog = env.catalog()?;
-    env.emit(EngineEvent::Catalog(catalog.all().cloned().collect()));
+    announce_catalog(env);
     env.emit(EngineEvent::ScheduleList(list_schedules(env)?));
+    Ok(())
+}
+
+/// The MCP editor waits for tool save/import results; every other failure (chat, runs) may
+/// arrive concurrently with those and must still reach chat.
+fn command_failure_event(command_kind: &str, message: String) -> EngineEvent {
+    match command_kind {
+        "save_tool" | "rename_tool" | "bulk_save_tools" => {
+            EngineEvent::CatalogMutationFailed(message)
+        }
+        _ => EngineEvent::Failure(message),
+    }
+}
+
+/// Write the starter catalog atomically: an interrupted first launch must not leave an empty
+/// file behind, because seeding only runs while the file is missing.
+pub(crate) fn seed_catalog(path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    crate::storage::write_atomically(path, &default_catalog_yaml())?;
+    Ok(())
+}
+
+/// True when replacing the catalog file cannot lose a tool: it is empty, comment-only, or
+/// holds no `tools` entries and nothing else.
+fn catalog_file_has_no_entries(path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    match serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        Ok(serde_yaml::Value::Null) => true,
+        Ok(serde_yaml::Value::Mapping(mapping)) => mapping.iter().all(|(key, value)| {
+            key.as_str() == Some("tools")
+                && (value.is_null() || value.as_sequence().is_some_and(Vec::is_empty))
+        }),
+        _ => false,
+    }
+}
+
+fn catalog_recovery_event(env: &EngineEnv, error: String) -> EngineEvent {
+    EngineEvent::CatalogRecoveryRequired {
+        path: env.paths.catalog_path.display().to_string(),
+        error,
+        empty: catalog_file_has_no_entries(&env.paths.catalog_path),
+    }
+}
+
+fn persist_catalog_updates(env: &EngineEnv, desired: &ToolCatalog) -> anyhow::Result<()> {
+    let mut snapshot = env.catalog_snapshot()?;
+    for entry in desired.all() {
+        let current = snapshot.catalog.get(&entry.name);
+        if current.is_some_and(|current| {
+            serde_json::to_value(current).ok() == serde_json::to_value(entry).ok()
+        }) {
+            continue;
+        }
+        if let Err(error) = snapshot.upsert(entry.clone()) {
+            tracing::warn!(tool.name = %entry.name, reason = %error, "catalog migration skipped unavailable name");
+        }
+    }
+    snapshot.save_to_file(&env.paths.catalog_path)?;
     Ok(())
 }
 
@@ -4046,7 +4234,9 @@ pub(crate) fn apply_patch_in_storage(
         // apply must see the same catalog the commit is checked against, and a
         // value captured outside could already be stale.
         let catalog = match paths.catalog_path.exists() {
-            true => ToolCatalog::load_from_file(&paths.catalog_path)?,
+            true => {
+                crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path)?.catalog
+            }
             false => ToolCatalog::default(),
         };
         let plan = storage
@@ -4255,69 +4445,86 @@ fn save_tool(env: &EngineEnv, entry: ToolEntry) -> anyhow::Result<()> {
     if entry.name.trim().is_empty() {
         anyhow::bail!("tool name must not be empty");
     }
-    let updated = env
-        .paths
+    env.paths
         .mutations
         .run_named("catalog.save_tool", env.triggered_by(), || {
-            let catalog = env.catalog()?;
-            let mut entries: Vec<ToolEntry> = catalog.all().cloned().collect();
-            match entries.iter_mut().find(|tool| tool.name == entry.name) {
-                Some(existing) => *existing = entry,
-                None => entries.push(entry),
-            }
-            let updated = ToolCatalog::new(entries);
+            let mut updated = env.catalog_snapshot()?;
+            let name = entry.name.clone();
+            updated.upsert(entry)?;
             updated.save_to_file(&env.paths.catalog_path)?;
-            Ok(updated)
-        })?;
-    env.emit(EngineEvent::Catalog(updated.all().cloned().collect()));
+            Ok(name)
+        })
+        .map(|name| env.emit(EngineEvent::ToolSaved { name }))?;
+    announce_catalog(env);
     Ok(())
+}
+
+fn announce_catalog(env: &EngineEnv) {
+    match env.load_catalog_snapshot() {
+        Ok(snapshot) => {
+            *env.paths.catalog_cache.lock().unwrap() = Some(snapshot.catalog.clone());
+            if !snapshot.diagnostics.is_empty() {
+                tracing::warn!(
+                    count = snapshot.diagnostics.len(),
+                    "unavailable catalog entries"
+                );
+                for item in &snapshot.diagnostics {
+                    tracing::warn!(position = item.position, name = ?item.name, reason = %item.error, "catalog entry unavailable");
+                }
+            }
+            env.emit(EngineEvent::Catalog(
+                snapshot.catalog.all().cloned().collect(),
+            ));
+            env.emit(EngineEvent::CatalogDiagnostics(snapshot.diagnostics));
+        }
+        Err(error) => {
+            tracing::error!(path = %env.paths.catalog_path.display(), reason = %error, "catalog cannot be loaded");
+            env.emit(catalog_recovery_event(env, error.to_string()));
+        }
+    }
 }
 
 fn rename_tool(env: &EngineEnv, old_name: &str, entry: ToolEntry) -> anyhow::Result<()> {
     if entry.name.trim().is_empty() {
         anyhow::bail!("tool name must not be empty");
     }
-    let updated =
-        env.paths
-            .mutations
-            .run_named("catalog.rename_tool", env.triggered_by(), || {
-                let catalog = env.catalog()?;
-                if !catalog.contains(old_name) {
-                    anyhow::bail!("tool '{old_name}' no longer exists");
-                }
-                if old_name != entry.name && catalog.contains(&entry.name) {
-                    anyhow::bail!("tool '{}' already exists", entry.name);
-                }
-                let entries = catalog
-                    .all()
-                    .filter(|tool| tool.name != old_name)
-                    .cloned()
-                    .chain(std::iter::once(entry))
-                    .collect();
-                let updated = ToolCatalog::new(entries);
-                updated.save_to_file(&env.paths.catalog_path)?;
-                Ok(updated)
-            })?;
-    env.emit(EngineEvent::Catalog(updated.all().cloned().collect()));
+    env.paths
+        .mutations
+        .run_named("catalog.rename_tool", env.triggered_by(), || {
+            let mut updated = env.catalog_snapshot()?;
+            if !updated.catalog.contains(old_name) {
+                anyhow::bail!("tool '{old_name}' no longer exists");
+            }
+            if old_name != entry.name && updated.catalog.contains(&entry.name) {
+                anyhow::bail!("tool '{}' already exists", entry.name);
+            }
+            let name = entry.name.clone();
+            if old_name == entry.name {
+                updated.upsert(entry)?;
+            } else {
+                let mut renamed = updated.clone();
+                renamed.remove_valid(old_name);
+                renamed.upsert(entry)?;
+                updated = renamed;
+            }
+            updated.save_to_file(&env.paths.catalog_path)?;
+            Ok(name)
+        })
+        .map(|name| env.emit(EngineEvent::ToolSaved { name }))?;
+    announce_catalog(env);
     Ok(())
 }
 
 fn delete_tool(env: &EngineEnv, name: &str) -> anyhow::Result<()> {
-    let updated =
-        env.paths
-            .mutations
-            .run_named("catalog.delete_tool", env.triggered_by(), || {
-                let catalog = env.catalog()?;
-                let entries = catalog
-                    .all()
-                    .filter(|tool| tool.name != name)
-                    .cloned()
-                    .collect();
-                let updated = ToolCatalog::new(entries);
-                updated.save_to_file(&env.paths.catalog_path)?;
-                Ok(updated)
-            })?;
-    env.emit(EngineEvent::Catalog(updated.all().cloned().collect()));
+    env.paths
+        .mutations
+        .run_named("catalog.delete_tool", env.triggered_by(), || {
+            let mut updated = env.catalog_snapshot()?;
+            updated.remove_valid(name);
+            updated.save_to_file(&env.paths.catalog_path)?;
+            Ok(())
+        })?;
+    announce_catalog(env);
     Ok(())
 }
 
@@ -4545,17 +4752,14 @@ async fn import_plan(
         env.paths
             .mutations
             .run_named("catalog.import_merge", env.triggered_by(), || {
-                let latest = env.catalog()?;
-                let mut entries = latest.all().cloned().collect::<Vec<_>>();
-                entries.extend(
-                    synthesized
-                        .iter()
-                        .filter(|entry| !latest.contains(&entry.name))
-                        .cloned(),
-                );
-                let merged = ToolCatalog::new(entries);
-                merged.save_to_file(&env.paths.catalog_path)?;
-                Ok(merged)
+                let mut snapshot = env.catalog_snapshot()?;
+                for entry in &synthesized {
+                    if !snapshot.catalog.contains(&entry.name) {
+                        snapshot.upsert(entry.clone())?;
+                    }
+                }
+                snapshot.save_to_file(&env.paths.catalog_path)?;
+                Ok(snapshot.catalog)
             })?
     };
 
@@ -4612,9 +4816,7 @@ async fn import_plan(
     env.emit(EngineEvent::PlanLoaded {
         plan: Box::new(plan),
     });
-    env.emit(EngineEvent::Catalog(
-        updated_catalog.all().cloned().collect(),
-    ));
+    announce_catalog(env);
     env.emit(EngineEvent::PlanList(list_plans(env)?));
     Ok(())
 }
@@ -6603,6 +6805,292 @@ tools:
         assert!(catalog.contains("other"));
     }
 
+    #[test]
+    fn engine_catalog_quarantines_invalid_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(
+            &paths.catalog_path,
+            "tools:\n- name: good\n  description: good\n  config: {kind: subprocess, command: echo}\n- name: bad\n  description: bad\n  config: {kind: subprocess, command: ''}\n",
+        )
+        .unwrap();
+        let catalog = test_env(paths).catalog().unwrap();
+        assert!(catalog.contains("good"));
+        assert!(!catalog.contains("bad"));
+    }
+
+    #[test]
+    fn catalog_mutations_preserve_quarantined_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(
+            &paths.catalog_path,
+            "tools:\n- name: broken\n  description: broken\n  config: {kind: subprocess, command: ''}\n",
+        )
+        .unwrap();
+        let env = test_env(paths.clone());
+        save_tool(&env, named_http_tool("valid")).unwrap();
+        let snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
+        assert!(snapshot.catalog.contains("valid"));
+        assert_eq!(snapshot.diagnostics.len(), 1);
+
+        let mut invalid = named_http_tool("new-invalid");
+        invalid.input_schema = serde_json::json!({"type": ["string", "string"]});
+        bulk_save_tools(&env, vec![named_http_tool("second"), invalid]).unwrap();
+        let snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
+        assert!(snapshot.catalog.contains("valid"));
+        assert!(snapshot.catalog.contains("second"));
+        assert!(!snapshot.catalog.contains("new-invalid"));
+        assert_eq!(snapshot.diagnostics.len(), 2);
+        assert!(save_tool(&env, named_http_tool("broken")).is_err());
+    }
+
+    #[test]
+    fn bootstrap_migrations_retain_quarantined_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(
+            &paths.catalog_path,
+            "tools:\n- name: broken\n  description: broken\n  config: {kind: subprocess, command: ''}\n",
+        )
+        .unwrap();
+        let env = test_env(paths.clone());
+        persist_catalog_updates(&env, &ToolCatalog::new(vec![named_http_tool("migrated")]))
+            .unwrap();
+        let snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
+        assert!(snapshot.catalog.contains("migrated"));
+        assert_eq!(snapshot.diagnostics[0].name.as_deref(), Some("broken"));
+    }
+
+    #[test]
+    fn broken_catalog_bootstrap_preserves_the_file_and_other_views() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        let broken = "tools: [\n";
+        std::fs::write(&paths.catalog_path, broken).unwrap();
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        let mut env = test_env(paths.clone());
+        env.evt_tx = evt_tx;
+        bootstrap(&env).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&paths.catalog_path).unwrap(),
+            broken
+        );
+        let emitted = events
+            .try_iter()
+            .map(|event| event.event)
+            .collect::<Vec<_>>();
+        assert!(
+            emitted
+                .iter()
+                .any(|event| matches!(event, EngineEvent::PlanList(_)))
+        );
+        assert!(emitted.iter().any(|event| matches!(event, EngineEvent::CatalogRecoveryRequired { path, error, empty: false } if path == &paths.catalog_path.display().to_string() && error.contains("YAML") && !error.contains(path.as_str()))));
+    }
+
+    #[tokio::test]
+    async fn list_and_remove_quarantined_tool_keep_valid_tools_available() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(
+            &paths.catalog_path,
+            "tools:\n- name: valid\n  description: valid\n  config: {kind: subprocess, command: echo}\n- name: bad\n  description: bad\n  config: {kind: subprocess, command: ''}\n",
+        )
+        .unwrap();
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        let mut env = test_env(paths.clone());
+        env.evt_tx = evt_tx;
+        handle_command(EngineCommand::ListTools, &env)
+            .await
+            .unwrap();
+        let emitted = events
+            .try_iter()
+            .map(|event| event.event)
+            .collect::<Vec<_>>();
+        assert!(emitted.iter().any(|event| matches!(event, EngineEvent::Catalog(tools) if tools.len() == 1 && tools[0].name == "valid")));
+        assert!(emitted.iter().any(|event| matches!(event, EngineEvent::CatalogDiagnostics(items) if items.len() == 1 && items[0].position == 1)));
+
+        let raw = crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path)
+            .unwrap()
+            .diagnostics[0]
+            .raw
+            .clone();
+        let mut stale = raw.clone();
+        stale["name"] = serde_yaml::Value::String("other".to_owned());
+        assert!(
+            handle_command(
+                EngineCommand::RemoveQuarantinedTool {
+                    position: 1,
+                    raw: stale
+                },
+                &env
+            )
+            .await
+            .is_err()
+        );
+        handle_command(
+            EngineCommand::RemoveQuarantinedTool { position: 1, raw },
+            &env,
+        )
+        .await
+        .unwrap();
+        let snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
+        assert!(snapshot.catalog.contains("valid"));
+        assert!(snapshot.diagnostics.is_empty());
+    }
+
+    #[tokio::test]
+    async fn explicit_catalog_restore_preserves_a_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        let broken = "tools: [\n";
+        std::fs::write(&paths.catalog_path, broken).unwrap();
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        let mut env = test_env(paths.clone());
+        env.evt_tx = evt_tx;
+        handle_command(EngineCommand::ListTools, &env)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&paths.catalog_path).unwrap(),
+            broken
+        );
+        handle_command(EngineCommand::RestoreCatalog, &env)
+            .await
+            .unwrap();
+        let emitted = events
+            .try_iter()
+            .map(|event| event.event)
+            .collect::<Vec<_>>();
+        let backup = emitted
+            .iter()
+            .find_map(|event| match event {
+                EngineEvent::CatalogRestored { backup } => Some(backup),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), broken);
+        assert!(!env.catalog().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn empty_catalog_file_offers_a_lossless_one_step_restore() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        for (content, empty) in [
+            ("", true),
+            ("# comment only\n", true),
+            ("tools:\n", true),
+            ("tools: [\n", false),
+            ("other: 1\n", false),
+        ] {
+            std::fs::write(&paths.catalog_path, content).unwrap();
+            let (evt_tx, events) = std::sync::mpsc::channel();
+            let mut env = test_env(paths.clone());
+            env.evt_tx = evt_tx;
+            handle_command(EngineCommand::ListTools, &env)
+                .await
+                .unwrap();
+            assert!(
+                events.try_iter().any(|event| matches!(
+                    event.event,
+                    EngineEvent::CatalogRecoveryRequired { empty: found, .. } if found == empty
+                )),
+                "{content:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&paths.catalog_path).unwrap(),
+                content
+            );
+        }
+    }
+
+    #[test]
+    fn seeding_creates_a_complete_starter_catalog() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("tools.yaml");
+        seed_catalog(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            default_catalog_yaml()
+        );
+        assert!(!ToolCatalog::load_from_file(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn only_tool_mutation_failures_bypass_chat() {
+        for kind in ["save_tool", "rename_tool", "bulk_save_tools"] {
+            assert!(matches!(
+                command_failure_event(kind, "boom".to_owned()),
+                EngineEvent::CatalogMutationFailed(_)
+            ));
+        }
+        for kind in ["compile", "delete_tool", "run_plan"] {
+            assert!(matches!(
+                command_failure_event(kind, "boom".to_owned()),
+                EngineEvent::Failure(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn repeated_bulk_import_does_not_duplicate_unavailable_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(&paths.catalog_path, "tools: []\n").unwrap();
+        let env = test_env(paths.clone());
+        let mut invalid = named_http_tool("invalid");
+        invalid.input_schema = serde_json::json!({"type": ["string", "string"]});
+        bulk_save_tools(&env, vec![named_http_tool("good"), invalid.clone()]).unwrap();
+        bulk_save_tools(&env, vec![named_http_tool("good"), invalid]).unwrap();
+        let snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
+        assert!(snapshot.catalog.contains("good"));
+        assert_eq!(snapshot.diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn save_tool_confirms_the_saved_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        let mut env = test_env(paths);
+        env.evt_tx = evt_tx;
+        save_tool(&env, named_http_tool("saved")).unwrap();
+        assert!(events.try_iter().any(
+            |event| matches!(event.event, EngineEvent::ToolSaved { name } if name == "saved")
+        ));
+    }
+
+    #[test]
+    fn catalog_keeps_last_valid_subset_when_file_becomes_broken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = DataPaths::at(tmp.path().to_owned());
+        std::fs::write(&paths.catalog_path, "tools:\n- name: healthy\n  description: healthy\n  config: {kind: subprocess, command: echo}\n").unwrap();
+        let env = test_env(paths.clone());
+        assert!(env.catalog().unwrap().contains("healthy"));
+        std::fs::write(&paths.catalog_path, "tools: [\n").unwrap();
+        assert!(env.catalog().unwrap().contains("healthy"));
+        assert!(env.catalog_snapshot().is_err());
+        assert!(save_tool(&env, named_http_tool("new")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&paths.catalog_path).unwrap(),
+            "tools: [\n"
+        );
+
+        let fresh = test_env(DataPaths::at(paths.data_dir.clone()));
+        assert!(
+            fresh
+                .catalog()
+                .unwrap_err()
+                .to_string()
+                .contains("tools.yaml")
+        );
+    }
     #[test]
     fn slugify_tool_name_makes_a_kebab_case_starting_point() {
         assert_eq!(
