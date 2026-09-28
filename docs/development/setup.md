@@ -51,12 +51,14 @@ INXM_MCP_ONLY=1 cargo run
 | --- | --- |
 | `src/app` | Desktop UI, engine bridge, scheduler, local MCP server |
 | `src/compiler` | LLM-backed plan compilation |
-| `src/validator` | Plan and tool contract validation |
 | `src/executor` | Dependency-aware step execution |
-| `src/repair` | Failure classification and repair patches |
 | `src/plan` | Plan data types and normalization |
+| `src/repair` | Failure classification and repair patches |
 | `src/storage` | Persistent plans, runs, schedules, and patches |
+| `src/support` | Shared cross-cutting helpers |
+| `src/telemetry` | Opt-in usage telemetry |
 | `src/tools` | Tool catalog and subprocess, HTTP, and MCP adapters |
+| `src/validator` | Plan and tool contract validation |
 | `tests` | Integration and live specification tests |
 
 <h2>What's next</h2>
