@@ -163,20 +163,51 @@ fn execution_span(entry: &ToolEntry) -> tracing::Span {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn validate_tool_output(entry: &ToolEntry, output: &ToolOutput) -> Result<(), ToolError> {
-    let schema_type = entry
-        .output_schema
-        .get("type")
-        .and_then(serde_json::Value::as_str);
-    let value = match schema_type {
-        Some("object") if output.data.is_object() => output.data.clone(),
-        Some("object") => serde_json::json!({
+    let process_output = || {
+        serde_json::json!({
             "stdout": output.stdout,
             "stderr": output.stderr,
             "exit_code": output.exit_code,
-        }),
-        Some("string") => serde_json::Value::String(output.stdout.clone()),
-        _ if !output.data.is_null() => output.data.clone(),
-        _ => serde_json::Value::String(output.stdout.clone()),
+        })
+    };
+    let stdout = || serde_json::Value::String(output.stdout.clone());
+    let fallback = || {
+        if output.data.is_null() {
+            stdout()
+        } else {
+            output.data.clone()
+        }
+    };
+    let value = match entry.output_schema.get("type") {
+        Some(serde_json::Value::String(single)) => match single.as_str() {
+            "object" if output.data.is_object() => output.data.clone(),
+            "object" => process_output(),
+            "string" => stdout(),
+            _ => fallback(),
+        },
+        // A union accepts the first representation that satisfies the whole schema, trying
+        // structured data before the process-output and stdout forms used for single types.
+        Some(serde_json::Value::Array(types)) => {
+            let allows = |name| types.iter().any(|item| item.as_str() == Some(name));
+            let mut candidates = Vec::new();
+            if !output.data.is_null() {
+                candidates.push(output.data.clone());
+            }
+            if allows("object") {
+                candidates.push(process_output());
+            }
+            if allows("string") {
+                candidates.push(stdout());
+            }
+            if allows("null") {
+                candidates.push(serde_json::Value::Null);
+            }
+            candidates
+                .into_iter()
+                .find(|candidate| validate_instance(&entry.output_schema, candidate).is_ok())
+                .unwrap_or_else(fallback)
+        }
+        _ => fallback(),
     };
     validate_instance(&entry.output_schema, &value).map_err(|message| ToolError::Execution {
         tool: entry.name.clone(),
@@ -277,6 +308,25 @@ mod tests {
         assert!(error.to_string().contains("$.count: expected integer"));
     }
 
+    #[tokio::test]
+    async fn union_inputs_are_rejected_before_adapter_execution() {
+        let mut entry = make_subprocess_entry();
+        entry.input_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "choice": { "type": ["string", "boolean"] } },
+            "required": ["choice"]
+        });
+        let arguments = [("choice".to_owned(), serde_json::json!(17))]
+            .into_iter()
+            .collect();
+        let error = execute_tool(&entry, &arguments, None).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("$.choice: expected string or boolean")
+        );
+    }
+
     #[test]
     fn successful_output_is_validated_against_output_schema() {
         let mut entry = make_subprocess_entry();
@@ -290,5 +340,43 @@ mod tests {
         let error = validate_tool_output(&entry, &output).unwrap_err();
         assert!(matches!(error, ToolError::Execution { .. }));
         assert!(error.to_string().contains("expected boolean"));
+    }
+
+    #[test]
+    fn output_unions_select_compatible_representations() {
+        let mut entry = make_subprocess_entry();
+        entry.output_schema = serde_json::json!({"type": ["object", "null"]});
+        let output = ToolOutput {
+            stdout: "hello".to_owned(),
+            ..ToolOutput::default()
+        };
+        assert!(validate_tool_output(&entry, &output).is_ok());
+
+        entry.output_schema = serde_json::json!({"type": ["string", "integer"]});
+        assert!(validate_tool_output(&entry, &output).is_ok());
+        entry.output_schema = serde_json::json!({"type": ["integer", "boolean"]});
+        assert!(
+            validate_tool_output(&entry, &output)
+                .unwrap_err()
+                .to_string()
+                .contains("expected integer or boolean")
+        );
+    }
+
+    #[test]
+    fn single_object_output_keeps_wrapping_non_object_data() {
+        let mut entry = make_subprocess_entry();
+        entry.output_schema = serde_json::json!({"type": "object"});
+        let output = ToolOutput {
+            stdout: "[1]".to_owned(),
+            data: serde_json::json!([1]),
+            ..ToolOutput::default()
+        };
+        assert!(validate_tool_output(&entry, &output).is_ok());
+
+        entry.output_schema = serde_json::json!({"type": ["string", "object"]});
+        assert!(validate_tool_output(&entry, &output).is_ok());
+        entry.output_schema = serde_json::json!({"type": ["array", "null"]});
+        assert!(validate_tool_output(&entry, &output).is_ok());
     }
 }
