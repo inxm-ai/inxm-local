@@ -21,7 +21,9 @@ nav:
       - Plans, runs, and repairs: user-guide/plans-and-runs.md
       - Run workflows from chat: user-guide/chat-workflows.md
       - Schedule workflows: user-guide/schedules.md
-      - Configure tools and MCP servers: user-guide/tools.md
+      - Configure tools and MCP servers:
+          - Overview: user-guide/tools.md
+          - MCP server examples: user-guide/mcp-server-examples.md
       - Use INXM with coding agents:
           - Overview: user-guide/coding-agents.md
           - Integrate Hermes Agent: user-guide/hermes.md
