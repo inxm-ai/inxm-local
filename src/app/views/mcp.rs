@@ -365,6 +365,9 @@ pub fn kind_style(config: &ToolConfig) -> (&'static str, Color32) {
 }
 
 pub fn show(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &EngineHandle) {
+    // Save/import results are not tied to a request, so the draft must not change until the
+    // pending mutation reports back — otherwise its result would land on a different draft.
+    let idle = !state.saving_tool && !state.importing_tools;
     egui::SidePanel::left("mcp_tool_list")
         .exact_width(LIST_WIDTH)
         .frame(
@@ -373,7 +376,9 @@ pub fn show(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &Eng
                 .inner_margin(egui::Margin::same(12)),
         )
         .show_separator_line(true)
-        .show_inside(ui, |ui| tool_list(ui, state, tools, engine));
+        .show_inside(ui, |ui| {
+            ui.add_enabled_ui(idle, |ui| tool_list(ui, state, tools, engine));
+        });
 
     egui::CentralPanel::default()
         .frame(
@@ -384,7 +389,9 @@ pub fn show(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &Eng
         .show_inside(ui, |ui| {
             widgets::scroll_area_vertical()
                 .auto_shrink([false, false])
-                .show(ui, |ui| editor(ui, state, engine));
+                .show(ui, |ui| {
+                    ui.add_enabled_ui(idle, |ui| editor(ui, state, engine));
+                });
         });
 }
 
