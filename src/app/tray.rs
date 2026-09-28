@@ -251,17 +251,17 @@ impl TrayController {
     /// active at startup there.
     pub fn set_dark_mode(&self, dark_mode: bool) {
         #[cfg(not(target_os = "linux"))]
-        if let Ok(icon) = app_icon(dark_mode) {
-            if let Err(error) = self.icon.set_icon(Some(icon)) {
-                tracing::warn!(
-                    operation = "system_tray.set_icon",
-                    app_version = env!("CARGO_PKG_VERSION"),
-                    triggered_by = "theme_change",
-                    outcome = "failure",
-                    error = %error,
-                    "failed to update tray icon for theme change"
-                );
-            }
+        if let Ok(icon) = app_icon(dark_mode)
+            && let Err(error) = self.icon.set_icon(Some(icon))
+        {
+            tracing::warn!(
+                operation = "system_tray.set_icon",
+                app_version = env!("CARGO_PKG_VERSION"),
+                triggered_by = "theme_change",
+                outcome = "failure",
+                error = %error,
+                "failed to update tray icon for theme change"
+            );
         }
         #[cfg(target_os = "linux")]
         let _ = dark_mode;
