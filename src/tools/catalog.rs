@@ -338,10 +338,325 @@ impl ToolCatalog {
 
     /// Persist the catalog to a YAML file (creating parent directories).
     pub fn save_to_file(&self, path: &Path) -> Result<(), ToolError> {
+        for tool in self.all() {
+            validate_tool_entry(tool)?;
+        }
+        if path.exists() {
+            let existing = CatalogSnapshot::load_from_file(path)?;
+            if !existing.diagnostics.is_empty() {
+                return Err(ToolError::Catalog(format!(
+                    "catalog {} contains unavailable entries; use CatalogSnapshot to preserve them",
+                    path.display()
+                )));
+            }
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(path, self.to_yaml()?)?;
+        crate::storage::write_atomically(path, &self.to_yaml()?).map_err(|error| {
+            ToolError::Catalog(format!("cannot save catalog {}: {error}", path.display()))
+        })?;
+        Ok(())
+    }
+}
+
+/// An entry rejected during tolerant loading, identified by its position in the file.
+#[derive(Debug, Clone)]
+pub struct CatalogDiagnostic {
+    pub position: usize,
+    pub name: Option<String>,
+    pub error: String,
+    pub raw: serde_yaml::Value,
+}
+
+#[derive(Debug, Clone)]
+enum SnapshotEntry {
+    /// A runnable tool together with the raw value it was classified from.
+    Valid(Box<ToolEntry>, serde_yaml::Value),
+    Quarantined(CatalogDiagnostic),
+}
+
+impl SnapshotEntry {
+    fn into_raw(self) -> serde_yaml::Value {
+        match self {
+            SnapshotEntry::Valid(_, raw) => raw,
+            SnapshotEntry::Quarantined(item) => item.raw,
+        }
+    }
+}
+
+fn raw_tool_name(raw: &serde_yaml::Value) -> Option<String> {
+    raw.as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("name".to_owned())))
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Valid tools for execution alongside the original ordered entries for repair and persistence.
+///
+/// Every mutation re-classifies the ordered entries with the loading rules, so the in-memory
+/// state always matches what reloading the saved document would produce.
+#[derive(Debug, Clone)]
+pub struct CatalogSnapshot {
+    pub catalog: ToolCatalog,
+    pub diagnostics: Vec<CatalogDiagnostic>,
+    entries: Vec<SnapshotEntry>,
+    source: Option<String>,
+}
+
+impl CatalogSnapshot {
+    /// Explicitly replace a broken catalog with a validated starter after a lossless backup.
+    pub fn restore_starter(
+        path: &Path,
+        starter_yaml: &str,
+    ) -> Result<std::path::PathBuf, ToolError> {
+        ToolCatalog::load_from_yaml(starter_yaml)?;
+        let backup = path.with_file_name(format!(
+            "{}.backup-{}",
+            path.file_name().unwrap_or_default().to_string_lossy(),
+            uuid::Uuid::new_v4()
+        ));
+        let result = (|| -> Result<(), std::io::Error> {
+            use std::io::Write;
+            let mut original = std::fs::File::open(path)?;
+            let mut destination = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&backup)?;
+            std::io::copy(&mut original, &mut destination)?;
+            destination.flush()?;
+            destination.sync_all()
+        })();
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&backup);
+            return Err(ToolError::Catalog(format!(
+                "cannot back up catalog {} to {}: {error}",
+                path.display(),
+                backup.display()
+            )));
+        }
+        crate::storage::write_atomically(path, starter_yaml).map_err(|error| {
+            ToolError::Catalog(format!(
+                "cannot replace catalog {} (backup at {}): {error}",
+                path.display(),
+                backup.display()
+            ))
+        })?;
+        Ok(backup)
+    }
+
+    pub fn load_from_file(path: &Path) -> Result<Self, ToolError> {
+        let raw = std::fs::read_to_string(path)?;
+        let mut snapshot = Self::load_from_yaml(&raw)?;
+        snapshot.source = Some(raw);
+        Ok(snapshot)
+    }
+
+    /// Load every entry independently; only document-level problems are errors.
+    ///
+    /// Unlike [`ToolCatalog::load_from_yaml`], a document without a `tools` array (including an
+    /// empty file) is a file-level error, so a truncated catalog reaches the recovery dialog
+    /// instead of silently appearing empty.
+    pub fn load_from_yaml(yaml: &str) -> Result<Self, ToolError> {
+        let document: serde_yaml::Value = serde_yaml::from_str(yaml)?;
+        let tools = document
+            .as_mapping()
+            .and_then(|mapping| mapping.get(serde_yaml::Value::String("tools".to_owned())))
+            .and_then(serde_yaml::Value::as_sequence)
+            .cloned()
+            .ok_or_else(|| ToolError::Catalog("catalog must contain a tools array".to_owned()))?;
+        Ok(Self::from_raw_entries(tools, None))
+    }
+
+    fn from_raw_entries(raws: Vec<serde_yaml::Value>, source: Option<String>) -> Self {
+        let mut snapshot = Self {
+            catalog: ToolCatalog::default(),
+            diagnostics: Vec::new(),
+            entries: Vec::with_capacity(raws.len()),
+            source,
+        };
+        for raw in raws {
+            let _ = snapshot.push_raw(raw);
+        }
+        snapshot
+    }
+
+    /// Classify one raw entry exactly as loading would when it follows the current entries.
+    fn push_raw(&mut self, raw: serde_yaml::Value) -> Result<(), Box<CatalogDiagnostic>> {
+        let result = serde_yaml::from_value::<ToolEntry>(raw.clone())
+            .map_err(|error| error.to_string())
+            .and_then(|tool| {
+                validate_tool_entry(&tool).map_err(|error| error.to_string())?;
+                if self.catalog.contains(&tool.name) {
+                    return Err(format!("duplicate tool name '{}'", tool.name));
+                }
+                Ok(tool)
+            });
+        match result {
+            Ok(tool) => {
+                self.catalog.tools.insert(tool.name.clone(), tool.clone());
+                self.entries.push(SnapshotEntry::Valid(Box::new(tool), raw));
+                Ok(())
+            }
+            Err(error) => {
+                let diagnostic = CatalogDiagnostic {
+                    position: self.entries.len(),
+                    name: raw_tool_name(&raw),
+                    error,
+                    raw,
+                };
+                self.entries
+                    .push(SnapshotEntry::Quarantined(diagnostic.clone()));
+                self.diagnostics.push(diagnostic.clone());
+                Err(Box::new(diagnostic))
+            }
+        }
+    }
+
+    /// Re-derive the runnable catalog and diagnostics after the ordered entries changed.
+    fn rebuild(&mut self) {
+        let raws = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(SnapshotEntry::into_raw)
+            .collect();
+        let source = self.source.take();
+        *self = Self::from_raw_entries(raws, source);
+    }
+
+    fn valid_position(&self, name: &str) -> Option<usize> {
+        self.entries.iter().position(
+            |entry| matches!(entry, SnapshotEntry::Valid(existing, _) if existing.name == name),
+        )
+    }
+
+    /// Replace a valid entry by name or append a new one; invalid edits leave the snapshot intact.
+    pub fn upsert(&mut self, tool: ToolEntry) -> Result<(), ToolError> {
+        validate_tool_entry(&tool)?;
+        let raw = serde_yaml::to_value(&tool)?;
+        if let Some(position) = self.valid_position(&tool.name) {
+            self.entries[position] = SnapshotEntry::Valid(Box::new(tool), raw);
+        } else if self
+            .diagnostics
+            .iter()
+            .any(|item| item.name.as_deref() == Some(&tool.name))
+        {
+            return Err(ToolError::Catalog(format!(
+                "tool '{}' also names a quarantined entry; use its position to repair it",
+                tool.name
+            )));
+        } else {
+            self.entries.push(SnapshotEntry::Valid(Box::new(tool), raw));
+        }
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Import a raw entry, preserving invalid or duplicate entries as unavailable diagnostics.
+    ///
+    /// A name is a duplicate only when a runnable tool already uses it, matching how the entry
+    /// is classified when the saved catalog is loaded again.
+    pub fn import(&mut self, raw: serde_yaml::Value) -> Result<(), Box<CatalogDiagnostic>> {
+        self.push_raw(raw)
+    }
+
+    pub fn remove_quarantined(&mut self, position: usize) -> bool {
+        if !matches!(
+            self.entries.get(position),
+            Some(SnapshotEntry::Quarantined(_))
+        ) {
+            return false;
+        }
+        self.entries.remove(position);
+        self.rebuild();
+        true
+    }
+
+    pub fn replace_quarantined(
+        &mut self,
+        position: usize,
+        tool: ToolEntry,
+    ) -> Result<(), ToolError> {
+        validate_tool_entry(&tool)?;
+        if !matches!(
+            self.entries.get(position),
+            Some(SnapshotEntry::Quarantined(_))
+        ) {
+            return Err(ToolError::Catalog(format!(
+                "no quarantined entry at position {position}"
+            )));
+        }
+        if self.catalog.contains(&tool.name) {
+            return Err(ToolError::Catalog(format!(
+                "duplicate tool name '{}'",
+                tool.name
+            )));
+        }
+        let raw = serde_yaml::to_value(&tool)?;
+        self.entries[position] = SnapshotEntry::Valid(Box::new(tool), raw);
+        self.rebuild();
+        Ok(())
+    }
+
+    /// Remove a runnable tool; a later same-named duplicate then becomes runnable, as on reload.
+    pub fn remove_valid(&mut self, name: &str) -> bool {
+        let Some(position) = self.valid_position(name) else {
+            return false;
+        };
+        self.entries.remove(position);
+        self.rebuild();
+        true
+    }
+
+    pub fn to_yaml(&self) -> Result<String, ToolError> {
+        let tools = self
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                SnapshotEntry::Valid(tool, _) => {
+                    serde_yaml::to_value(tool).map_err(ToolError::from)
+                }
+                SnapshotEntry::Quarantined(item) => Ok(item.raw.clone()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut document = serde_yaml::Mapping::new();
+        document.insert(
+            serde_yaml::Value::String("tools".to_owned()),
+            serde_yaml::Value::Sequence(tools),
+        );
+        Ok(serde_yaml::to_string(&document)?)
+    }
+
+    /// Refuse to overwrite a changed or unreadable source; publish the new document atomically.
+    pub fn save_to_file(&mut self, path: &Path) -> Result<(), ToolError> {
+        if path.exists() {
+            let current = std::fs::read_to_string(path)?;
+            if let Some(source) = &self.source {
+                if &current != source {
+                    return Err(ToolError::Catalog(format!(
+                        "catalog {} changed since loading",
+                        path.display()
+                    )));
+                }
+            } else {
+                return Err(ToolError::Catalog(format!(
+                    "catalog {} was not loaded from this file; reload it before saving",
+                    path.display()
+                )));
+            }
+        } else if self.source.is_some() {
+            return Err(ToolError::Catalog(format!(
+                "catalog {} was removed since loading",
+                path.display()
+            )));
+        }
+        let content = self.to_yaml()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        crate::storage::write_atomically(path, &content).map_err(|error| {
+            ToolError::Catalog(format!("cannot save catalog {}: {error}", path.display()))
+        })?;
+        self.source = Some(content);
         Ok(())
     }
 }
@@ -745,7 +1060,230 @@ tools:
         );
         assert_catalog_error(
             "tools:\n- name: bad\n  description: bad\n  config:\n    kind: subprocess\n    command: echo\n  output_schema:\n    type: 42\n",
-            "output_schema: $.type must be a string",
+            "output_schema: $.type must be a string or an array of strings",
+        );
+    }
+
+    #[test]
+    fn mcp_type_unions_round_trip_without_normalization() {
+        let yaml = SAMPLE_YAML.replace(
+            "          type: string\n",
+            "          type: [string, number, boolean]\n",
+        );
+        let catalog = ToolCatalog::load_from_yaml(&yaml).unwrap();
+        let saved = catalog.to_yaml().unwrap();
+        let restored = ToolCatalog::load_from_yaml(&saved).unwrap();
+        assert_eq!(
+            restored.get("echo").unwrap().input_schema["properties"]["message"]["type"],
+            serde_json::json!(["string", "number", "boolean"])
+        );
+    }
+
+    #[test]
+    fn tolerant_loading_preserves_invalid_entries_and_keeps_valid_tools() {
+        let yaml = "tools:\n- name: first\n  description: first\n  config: {kind: subprocess, command: echo}\n- name: broken\n  config: {kind: mcp, tool_name: call}\n- name: second\n  description: second\n  config: {kind: subprocess, command: echo}\n- name: first\n  description: duplicate\n  config: {kind: subprocess, command: echo}\n";
+        let mut snapshot = CatalogSnapshot::load_from_yaml(yaml).unwrap();
+        assert_eq!(snapshot.catalog.len(), 2);
+        assert!(snapshot.catalog.contains("first"));
+        assert!(snapshot.catalog.contains("second"));
+        assert!(!snapshot.catalog.contains("broken"));
+        assert_eq!(snapshot.diagnostics.len(), 2);
+        assert_eq!(snapshot.diagnostics[0].position, 1);
+        assert_eq!(snapshot.diagnostics[0].name.as_deref(), Some("broken"));
+        assert!(
+            snapshot.diagnostics[1]
+                .error
+                .contains("duplicate tool name 'first'")
+        );
+
+        let mut updated = snapshot.catalog.get("second").unwrap().clone();
+        updated.description = "edited".to_owned();
+        snapshot.upsert(updated).unwrap();
+        let reloaded = CatalogSnapshot::load_from_yaml(&snapshot.to_yaml().unwrap()).unwrap();
+        assert_eq!(reloaded.diagnostics.len(), 2);
+        assert_eq!(reloaded.diagnostics[0].raw, snapshot.diagnostics[0].raw);
+        assert_eq!(
+            reloaded.catalog.get("second").unwrap().description,
+            "edited"
+        );
+        assert!(snapshot.remove_quarantined(1));
+        assert_eq!(snapshot.diagnostics[0].position, 2);
+        assert_eq!(snapshot.catalog.len(), 2);
+    }
+
+    #[test]
+    fn documents_without_a_tools_array_are_file_level_errors() {
+        for yaml in ["", "{}\n", "tools:\n", "other: 1\n", "[]\n", "tools: {}\n"] {
+            assert!(
+                CatalogSnapshot::load_from_yaml(yaml)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("catalog must contain a tools array"),
+                "{yaml:?}"
+            );
+        }
+        let snapshot = CatalogSnapshot::load_from_yaml("tools: []\n").unwrap();
+        assert!(snapshot.catalog.is_empty() && snapshot.diagnostics.is_empty());
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tools.yaml");
+        std::fs::write(&path, "").unwrap();
+        let backup = CatalogSnapshot::restore_starter(&path, SAMPLE_YAML).unwrap();
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), "");
+        assert_eq!(
+            CatalogSnapshot::load_from_file(&path)
+                .unwrap()
+                .catalog
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn snapshot_mutations_match_reloading_the_saved_document() {
+        let tool = |description: &str| {
+            format!(
+                "- name: first\n  description: {description}\n  config: {{kind: subprocess, command: echo}}\n"
+            )
+        };
+        let yaml = format!("tools:\n{}{}", tool("original"), tool("duplicate"));
+        let assert_matches_reload = |snapshot: &CatalogSnapshot| {
+            let reloaded = CatalogSnapshot::load_from_yaml(&snapshot.to_yaml().unwrap()).unwrap();
+            let names = |catalog: &ToolCatalog| {
+                catalog
+                    .all()
+                    .map(|tool| (tool.name.clone(), tool.description.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(names(&snapshot.catalog), names(&reloaded.catalog));
+            let diagnostics = |snapshot: &CatalogSnapshot| {
+                snapshot
+                    .diagnostics
+                    .iter()
+                    .map(|item| (item.position, item.error.clone()))
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(diagnostics(snapshot), diagnostics(&reloaded));
+        };
+
+        // Editing the runnable tool is not blocked by its quarantined duplicate.
+        let mut snapshot = CatalogSnapshot::load_from_yaml(&yaml).unwrap();
+        let mut edited = snapshot.catalog.get("first").unwrap().clone();
+        edited.description = "edited".to_owned();
+        snapshot.upsert(edited).unwrap();
+        assert_eq!(snapshot.catalog.get("first").unwrap().description, "edited");
+        assert_eq!(snapshot.diagnostics.len(), 1);
+        assert_matches_reload(&snapshot);
+
+        // Removing the runnable tool promotes the duplicate, as the saved file would on reload.
+        assert!(snapshot.remove_valid("first"));
+        assert_eq!(
+            snapshot.catalog.get("first").unwrap().description,
+            "duplicate"
+        );
+        assert!(snapshot.diagnostics.is_empty());
+        assert_matches_reload(&snapshot);
+
+        // Re-importing a fixed tool next to its broken entry makes it runnable.
+        let mut snapshot = CatalogSnapshot::load_from_yaml(
+            "tools:\n- name: fixed\n  description: broken\n  config: {kind: subprocess, command: ''}\n",
+        )
+        .unwrap();
+        let raw = serde_yaml::from_str(
+            "name: fixed\ndescription: fixed\nconfig: {kind: subprocess, command: echo}\n",
+        )
+        .unwrap();
+        snapshot.import(raw).unwrap();
+        assert!(snapshot.catalog.contains("fixed"));
+        assert_eq!(snapshot.diagnostics.len(), 1);
+        assert_matches_reload(&snapshot);
+    }
+
+    #[test]
+    fn mixed_import_quarantines_invalid_entries_without_claiming_success() {
+        let mut snapshot = CatalogSnapshot::load_from_yaml("tools: []\n").unwrap();
+        let valid = serde_yaml::from_str(
+            "name: good\ndescription: good\nconfig: {kind: subprocess, command: echo}\n",
+        )
+        .unwrap();
+        let invalid: serde_yaml::Value = serde_yaml::from_str("name: bad\ndescription: bad\nconfig: {kind: subprocess, command: echo}\ninput_schema: {type: [string, string]}\n").unwrap();
+        snapshot.import(valid).unwrap();
+        let error = snapshot.import(invalid.clone()).unwrap_err();
+        assert_eq!(error.position, 1);
+        assert!(error.error.contains("duplicates 'string'"));
+        assert_eq!(snapshot.catalog.len(), 1);
+        assert_eq!(snapshot.diagnostics[0].raw, invalid);
+    }
+
+    #[test]
+    fn file_level_errors_block_saves_without_overwriting_the_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tools.yaml");
+        std::fs::write(&path, "tools: []\n").unwrap();
+        let mut snapshot = CatalogSnapshot::load_from_file(&path).unwrap();
+        let broken = "tools: [\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(snapshot.save_to_file(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+        assert!(CatalogSnapshot::load_from_file(&path).is_err());
+        assert!(CatalogSnapshot::load_from_yaml("tools: {}\n").is_err());
+        assert!(CatalogSnapshot::load_from_yaml("tools: []\n").is_ok());
+        assert!(ToolCatalog::new(vec![]).save_to_file(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn explicit_restore_backs_up_broken_catalog_before_replacing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tools.yaml");
+        let broken = "tools: [\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(CatalogSnapshot::restore_starter(&path, "tools: [\n").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+
+        let backup = CatalogSnapshot::restore_starter(&path, SAMPLE_YAML).unwrap();
+        assert_ne!(backup, path);
+        assert_eq!(std::fs::read_to_string(backup).unwrap(), broken);
+        assert_eq!(ToolCatalog::load_from_file(&path).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn legacy_save_cannot_discard_quarantined_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tools.yaml");
+        let yaml =
+            "tools:\n- name: bad\n  description: bad\n  config: {kind: subprocess, command: ''}\n";
+        std::fs::write(&path, yaml).unwrap();
+        assert!(ToolCatalog::new(vec![]).save_to_file(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), yaml);
+    }
+
+    #[test]
+    fn snapshot_edits_preserve_invalid_entries_on_disk() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tools.yaml");
+        let yaml = format!(
+            "{SAMPLE_YAML}\n  - name: bad\n    description: bad\n    config: {{kind: subprocess, command: ''}}\n"
+        );
+        std::fs::write(&path, &yaml).unwrap();
+        let mut snapshot = CatalogSnapshot::load_from_file(&path).unwrap();
+        let mut tool = snapshot.catalog.get("echo").unwrap().clone();
+        tool.description = "updated".to_owned();
+        snapshot.upsert(tool).unwrap();
+        snapshot.save_to_file(&path).unwrap();
+        let reloaded = CatalogSnapshot::load_from_file(&path).unwrap();
+        assert_eq!(reloaded.catalog.get("echo").unwrap().description, "updated");
+        assert_eq!(reloaded.diagnostics.len(), 1);
+        assert_eq!(reloaded.diagnostics[0].name.as_deref(), Some("bad"));
+
+        let mut unrelated = CatalogSnapshot::load_from_yaml("tools: []\n").unwrap();
+        assert!(unrelated.save_to_file(&path).is_err());
+        assert_eq!(
+            CatalogSnapshot::load_from_file(&path)
+                .unwrap()
+                .catalog
+                .len(),
+            1
         );
     }
 
