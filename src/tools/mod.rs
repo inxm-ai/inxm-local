@@ -171,8 +171,13 @@ fn validate_tool_output(entry: &ToolEntry, output: &ToolOutput) -> Result<(), To
         })
     };
     let stdout = || serde_json::Value::String(output.stdout.clone());
+    // `data` is also null when stdout is not JSON, so only a literal JSON null counts as null.
+    let emitted_null = serde_json::from_str::<serde_json::Value>(output.stdout.trim())
+        .is_ok_and(|value| value.is_null());
     let fallback = || {
-        if output.data.is_null() {
+        if emitted_null {
+            serde_json::Value::Null
+        } else if output.data.is_null() {
             stdout()
         } else {
             output.data.clone()
@@ -198,12 +203,6 @@ fn validate_tool_output(entry: &ToolEntry, output: &ToolOutput) -> Result<(), To
             }
             if allows("string") {
                 candidates.push(stdout());
-            }
-            // `data` is also null when stdout is not JSON, so only a literal JSON null counts.
-            let emitted_null = serde_json::from_str::<serde_json::Value>(output.stdout.trim())
-                .is_ok_and(|value| value.is_null());
-            if allows("null") && emitted_null {
-                candidates.push(serde_json::Value::Null);
             }
             candidates
                 .into_iter()
@@ -381,6 +380,10 @@ mod tests {
             ..ToolOutput::default()
         };
         assert!(validate_tool_output(&entry, &json_null).is_ok());
+
+        entry.output_schema = serde_json::json!({"type": "null"});
+        assert!(validate_tool_output(&entry, &json_null).is_ok());
+        assert!(validate_tool_output(&entry, &unparsed).is_err());
     }
 
     #[test]
