@@ -290,10 +290,28 @@ fn format_map(map: &IndexMap<String, String>) -> String {
 
 // ─── View state ───────────────────────────────────────────────────────────────
 
+/// A catalog file that cannot be loaded at all, awaiting a recovery decision.
+#[derive(Debug, Clone)]
+pub struct CatalogFileError {
+    pub path: String,
+    pub error: String,
+    /// The file holds no tool entries, so restoring the starter needs no second confirmation.
+    pub empty: bool,
+}
+
 #[derive(Default)]
 pub struct McpState {
     pub draft: Option<ToolDraft>,
     pub error: Option<String>,
+    pub diagnostics: Vec<crate::tools::catalog::CatalogDiagnostic>,
+    pub catalog_error: Option<CatalogFileError>,
+    pub recovery_open: bool,
+    pub recovery_dismissed: bool,
+    pub confirm_restore: bool,
+    pub selected_diagnostic: Option<usize>,
+    pub confirm_remove_diagnostic: Option<usize>,
+    pub saving_tool: bool,
+    pub importing_tools: bool,
     pub confirm_delete: Option<String>,
     pub notice: Option<String>,
     /// Free text for the "describe what you need" box.
@@ -373,6 +391,13 @@ pub fn show(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &Eng
 fn tool_list(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &EngineHandle) {
     ui.horizontal(|ui| {
         widgets::section_label(ui, "Catalog");
+        if !state.diagnostics.is_empty() {
+            ui.label(
+                RichText::new(format!("⚠ {} unavailable", state.diagnostics.len()))
+                    .color(theme::warn()),
+            )
+            .on_hover_text("These entries cannot be used by plans or MCP clients.");
+        }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if widgets::primary_button(ui, "+ Add").clicked() {
                 state.draft = Some(ToolDraft::new(DraftKind::Mcp));
@@ -383,6 +408,18 @@ fn tool_list(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &En
             }
         });
     });
+    if let Some(catalog_error) = &state.catalog_error
+        && ui
+            .button(RichText::new("⚠ Catalog error").color(theme::err()))
+            .on_hover_text(format!(
+                "Cannot read {}; open recovery options",
+                catalog_error.path
+            ))
+            .clicked()
+    {
+        state.recovery_open = true;
+        state.recovery_dismissed = false;
+    }
     ui.add_space(6.0);
 
     describe_section(ui, state, engine);
@@ -391,7 +428,7 @@ fn tool_list(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &En
     widgets::scroll_area_vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            if tools.is_empty() {
+            if tools.is_empty() && state.diagnostics.is_empty() && state.catalog_error.is_none() {
                 ui.label(
                     RichText::new("No tools yet — add your first MCP server.")
                         .color(theme::text_muted()),
@@ -465,6 +502,20 @@ fn tool_list(ui: &mut Ui, state: &mut McpState, tools: &[ToolEntry], engine: &En
                     ui.add_space(4.0);
                 });
             }
+            for diagnostic in &state.diagnostics {
+                let name = diagnostic.name.as_deref().unwrap_or("Unnamed entry");
+                if ui
+                    .selectable_label(
+                        state.selected_diagnostic == Some(diagnostic.position),
+                        RichText::new(format!("⚠ {name} · unavailable")).color(theme::warn()),
+                    )
+                    .on_hover_text(&diagnostic.error)
+                    .clicked()
+                {
+                    state.selected_diagnostic = Some(diagnostic.position);
+                    state.draft = None;
+                }
+            }
         });
 }
 
@@ -518,6 +569,44 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
     if let Some(notice) = &state.notice {
         ui.label(RichText::new(notice).color(theme::ok()));
         ui.add_space(6.0);
+    }
+
+    if let Some(position) = state.selected_diagnostic
+        && let Some(diagnostic) = state
+            .diagnostics
+            .iter()
+            .find(|item| item.position == position)
+    {
+        widgets::section_label(ui, "Unavailable tool");
+        ui.label(diagnostic.name.as_deref().unwrap_or("Unnamed entry"));
+        if let Some(kind) = diagnostic
+            .raw
+            .as_mapping()
+            .and_then(|entry| entry.get(serde_yaml::Value::String("config".to_owned())))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|config| config.get(serde_yaml::Value::String("kind".to_owned())))
+            .and_then(serde_yaml::Value::as_str)
+        {
+            ui.label(format!("Source: {kind}"));
+        }
+        widgets::wrapped_label(ui, RichText::new(&diagnostic.error).color(theme::err()));
+        ui.add_space(12.0);
+        if state.confirm_remove_diagnostic == Some(position) {
+            if widgets::danger_button(ui, "Confirm removal").clicked() {
+                engine.send(EngineCommand::RemoveQuarantinedTool {
+                    position,
+                    raw: diagnostic.raw.clone(),
+                });
+                state.confirm_remove_diagnostic = None;
+                state.selected_diagnostic = None;
+            }
+            if widgets::ghost_button(ui, "Cancel").clicked() {
+                state.confirm_remove_diagnostic = None;
+            }
+        } else if widgets::danger_button(ui, "Remove unavailable entry").clicked() {
+            state.confirm_remove_diagnostic = Some(position);
+        }
+        return;
     }
 
     let Some(draft) = &mut state.draft else {
@@ -658,7 +747,7 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
                 // Discovering and importing tools from the server is the
                 // primary way to add MCP tools — it needs only the
                 // connection fields above, not a specific tool name.
-                bulk_import_section(
+                if bulk_import_section(
                     ui,
                     draft,
                     &mut state.discovering,
@@ -666,7 +755,9 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
                     &mut state.error,
                     &mut state.notice,
                     engine,
-                );
+                ) {
+                    state.importing_tools = true;
+                }
 
                 ui.add_space(6.0);
                 egui::CollapsingHeader::new("Add a single tool manually")
@@ -783,17 +874,13 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
                 .and_then(|discovery| selected_discovered_entries(draft, discovery));
             match pending_selection {
                 Some(Ok(entries)) => {
-                    let count = entries.len();
                     engine.send(EngineCommand::BulkSaveTools { entries });
-                    state.notice = Some(format!("Imported {count} tool(s)."));
-                    state.discovery = None;
+                    state.importing_tools = true;
                     state.error = None;
-                    close_draft = true;
                 }
                 Some(Err(message)) => state.error = Some(message),
                 None => match draft.to_entry() {
                     Ok(entry) => {
-                        state.notice = Some(format!("Saved “{}”.", entry.name));
                         match &draft.editing {
                             Some(old) if *old != entry.name => {
                                 engine.send(EngineCommand::RenameTool {
@@ -805,8 +892,8 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
                                 entry: Box::new(entry),
                             }),
                         }
+                        state.saving_tool = true;
                         state.error = None;
-                        close_draft = true;
                     }
                     Err(message) => state.error = Some(message),
                 },
@@ -841,6 +928,112 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
     }
 }
 
+pub fn recovery_dialog(ctx: &egui::Context, state: &mut McpState, engine: &EngineHandle) {
+    if !state.recovery_open {
+        return;
+    }
+    let Some(CatalogFileError { path, error, empty }) = &state.catalog_error else {
+        return;
+    };
+    let mut open = true;
+    // Window titles use the (large) heading style by default; this is a plain dialog.
+    egui::Window::new(RichText::new("Tool catalog needs repair").size(theme::FONT_BODY))
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .open(&mut open)
+        .show(ctx, |ui| {
+            ui.set_width(RECOVERY_DIALOG_WIDTH);
+            widgets::wrapped_label(ui, RichText::new(error).color(theme::err()));
+            // Some errors (a failed backup, for example) already name the file.
+            if !error.contains(path.as_str()) {
+                widgets::wrapped_label(
+                    ui,
+                    RichText::new(format!("File: {path}")).color(theme::text_muted()),
+                );
+            }
+            ui.add_space(10.0);
+            if *empty {
+                widgets::wrapped_label(
+                    ui,
+                    RichText::new(
+                        "The file contains no tools, so replacing it loses nothing. \
+                         The original file will still be backed up first.",
+                    ),
+                );
+                ui.add_space(10.0);
+                let (keep, replace) = centered_button_pair(
+                    ui,
+                    |ui| widgets::ghost_button(ui, "Keep file and repair manually"),
+                    |ui| widgets::primary_button(ui, "Replace with starter catalog"),
+                );
+                if keep {
+                    state.recovery_open = false;
+                    state.recovery_dismissed = true;
+                }
+                if replace {
+                    engine.send(EngineCommand::RestoreCatalog);
+                    state.recovery_open = false;
+                }
+            } else if state.confirm_restore {
+                widgets::wrapped_label(
+                    ui,
+                    RichText::new(
+                        "Replacing the active catalog removes existing configured tools. \
+                         The original file will be backed up first.",
+                    ),
+                );
+                ui.add_space(10.0);
+                let (cancel, confirm) = centered_button_pair(
+                    ui,
+                    |ui| widgets::ghost_button(ui, "Cancel replacement"),
+                    |ui| widgets::danger_button(ui, "Confirm replacement"),
+                );
+                if cancel {
+                    state.confirm_restore = false;
+                }
+                if confirm {
+                    engine.send(EngineCommand::RestoreCatalog);
+                    state.recovery_open = false;
+                    state.confirm_restore = false;
+                }
+            } else {
+                let (keep, replace) = centered_button_pair(
+                    ui,
+                    |ui| widgets::primary_button(ui, "Keep file and repair manually"),
+                    |ui| widgets::danger_button(ui, "Replace with starter catalog"),
+                );
+                if keep {
+                    state.recovery_open = false;
+                    state.recovery_dismissed = true;
+                }
+                if replace {
+                    state.confirm_restore = true;
+                }
+            }
+        });
+    if !open {
+        state.recovery_open = false;
+        state.recovery_dismissed = true;
+        state.confirm_restore = false;
+    }
+}
+
+const RECOVERY_DIALOG_WIDTH: f32 = 460.0;
+
+/// Two buttons side by side, each centered in its half of the dialog; returns which were clicked.
+fn centered_button_pair(
+    ui: &mut Ui,
+    left: impl FnOnce(&mut Ui) -> egui::Response,
+    right: impl FnOnce(&mut Ui) -> egui::Response,
+) -> (bool, bool) {
+    ui.columns(2, |columns| {
+        let left = columns[0].vertical_centered(left).inner.clicked();
+        let right = columns[1].vertical_centered(right).inner.clicked();
+        (left, right)
+    })
+}
+
 fn empty_editor_hint(ui: &mut Ui) {
     ui.add_space(40.0);
     ui.vertical_centered(|ui| {
@@ -863,7 +1056,7 @@ fn empty_editor_hint(ui: &mut Ui) {
 /// a checklist for bulk-importing the tools it advertises. Applies to both
 /// transports — it only needs the connection fields, not `tool_name`. If
 /// `draft.name` is set it's used to namespace imported tool names (see
-/// [`discovered_tool_to_entry`]).
+/// [`discovered_tool_to_entry`]). Returns true when an import was sent.
 fn bulk_import_section(
     ui: &mut Ui,
     draft: &ToolDraft,
@@ -872,7 +1065,7 @@ fn bulk_import_section(
     error: &mut Option<String>,
     notice: &mut Option<String>,
     engine: &EngineHandle,
-) {
+) -> bool {
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!*discovering, |ui| {
             if widgets::ghost_button(ui, "List tools on server").clicked() {
@@ -893,19 +1086,19 @@ fn bulk_import_section(
     });
 
     let Some(found) = discovery.as_mut() else {
-        return;
+        return false;
     };
 
     if let Some(message) = &found.error {
         ui.add_space(4.0);
         widgets::wrapped_label(ui, RichText::new(message).color(theme::err()));
-        return;
+        return false;
     }
 
     if found.tools.is_empty() {
         ui.add_space(4.0);
         ui.label(RichText::new("The server advertised no tools.").color(theme::text_muted()));
-        return;
+        return false;
     }
 
     ui.add_space(6.0);
@@ -945,16 +1138,16 @@ fn bulk_import_section(
     // `found`'s borrow of `*discovery` ends here — nothing below reads it,
     // so the button handler below is free to reset `*discovery`.
 
+    let mut started = false;
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_enabled_ui(selected_count > 0, |ui| {
             if widgets::primary_button(ui, &format!("Import {selected_count} selected")).clicked() {
                 match built {
                     Ok(entries) => {
-                        let count = entries.len();
                         engine.send(EngineCommand::BulkSaveTools { entries });
-                        *notice = Some(format!("Imported {count} tool(s)."));
-                        *discovery = None;
+                        started = true;
+                        *notice = Some("Importing selected tools…".to_owned());
                     }
                     Err(message) => *error = Some(message),
                 }
@@ -964,6 +1157,7 @@ fn bulk_import_section(
             *discovery = None;
         }
     });
+    started
 }
 
 /// Builds catalog entries for every selected tool in `discovery`. Returns
