@@ -137,6 +137,13 @@ fn headless_message_body(event: EngineEvent) -> Option<(Role, MessageBody)> {
     match event {
         EngineEvent::Assistant(text) => Some((Role::Assistant, MessageBody::Text(text))),
         EngineEvent::Failure(text) => Some((Role::Assistant, MessageBody::Error(text))),
+        EngineEvent::CatalogRecoveryRequired { path, error, .. } => Some((
+            Role::Assistant,
+            MessageBody::Error(format!("Catalog {path} needs manual repair: {error}")),
+        )),
+        EngineEvent::CatalogMutationFailed(text) => {
+            Some((Role::Assistant, MessageBody::Error(text)))
+        }
         EngineEvent::RunStarted { run_id, .. } => Some((
             Role::Assistant,
             MessageBody::RunStarted {
@@ -1026,6 +1033,19 @@ impl InxmApp {
                     },
                 );
             }
+            EngineEvent::CatalogMutationFailed(text) => {
+                self.mcp.saving_tool = false;
+                self.mcp.importing_tools = false;
+                self.mcp.notice = None;
+                self.mcp.error = Some(text);
+            }
+            EngineEvent::ToolSaved { name } => {
+                if self.mcp.saving_tool {
+                    self.mcp.saving_tool = false;
+                    self.mcp.notice = Some(format!("Saved “{name}”."));
+                    self.mcp.draft = None;
+                }
+            }
             EngineEvent::Failure(text) => {
                 self.chat.busy = None;
                 // A failed assess/design/compile call must not leave the
@@ -1350,6 +1370,31 @@ impl InxmApp {
                         .push(Role::Assistant, MessageBody::ToolIndex(tools.clone()));
                 }
                 self.tools = tools;
+            }
+            EngineEvent::CatalogDiagnostics(diagnostics) => {
+                self.mcp.diagnostics = diagnostics;
+                self.mcp.selected_diagnostic = None;
+                self.mcp.catalog_error = None;
+                self.mcp.recovery_open = false;
+                self.mcp.recovery_dismissed = false;
+            }
+            EngineEvent::CatalogRecoveryRequired { path, error, empty } => {
+                self.mcp.catalog_error = Some(mcp::CatalogFileError { path, error, empty });
+                self.mcp.recovery_open = !self.mcp.recovery_dismissed;
+            }
+            EngineEvent::CatalogRestored { backup } => {
+                self.mcp.catalog_error = None;
+                self.mcp.recovery_open = false;
+                self.mcp.notice = Some(format!("Starter catalog restored. Backup: {backup}"));
+            }
+            EngineEvent::CatalogImportSummary {
+                imported,
+                unavailable,
+            } => {
+                self.mcp.importing_tools = false;
+                self.mcp.discovery = None;
+                self.mcp.draft = None;
+                self.mcp.notice = Some(format!("{imported} imported, {unavailable} unavailable"));
             }
             EngineEvent::ToolSynthesized { entry } => {
                 self.mcp.synthesizing = false;
@@ -2432,6 +2477,7 @@ impl eframe::App for InxmApp {
                         }
                     });
             });
+        mcp::recovery_dialog(ctx, &mut self.mcp, &self.engine);
     }
 }
 
@@ -2615,6 +2661,15 @@ mod shell_tests {
         assert!(matches!(
             headless_message_body(EngineEvent::Failure("boom".to_owned())),
             Some((Role::Assistant, MessageBody::Error(text))) if text == "boom"
+        ));
+        assert!(matches!(
+            headless_message_body(EngineEvent::CatalogRecoveryRequired {
+                path: "/tmp/tools.yaml".to_owned(),
+                error: "invalid YAML".to_owned(),
+                empty: false,
+            }),
+            Some((Role::Assistant, MessageBody::Error(text)))
+                if text.contains("/tmp/tools.yaml") && text.contains("invalid YAML")
         ));
 
         let failed = finished_run(RunStatus::Failed {
