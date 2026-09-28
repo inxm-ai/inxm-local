@@ -199,7 +199,10 @@ fn validate_tool_output(entry: &ToolEntry, output: &ToolOutput) -> Result<(), To
             if allows("string") {
                 candidates.push(stdout());
             }
-            if allows("null") {
+            // `data` is also null when stdout is not JSON, so only a literal JSON null counts.
+            let emitted_null = serde_json::from_str::<serde_json::Value>(output.stdout.trim())
+                .is_ok_and(|value| value.is_null());
+            if allows("null") && emitted_null {
                 candidates.push(serde_json::Value::Null);
             }
             candidates
@@ -361,6 +364,23 @@ mod tests {
                 .to_string()
                 .contains("expected integer or boolean")
         );
+    }
+
+    #[test]
+    fn output_unions_accept_null_only_when_stdout_is_json_null() {
+        let mut entry = make_subprocess_entry();
+        entry.output_schema = serde_json::json!({"type": ["boolean", "null"]});
+        let unparsed = ToolOutput {
+            stdout: "hello".to_owned(),
+            ..ToolOutput::default()
+        };
+        assert!(validate_tool_output(&entry, &unparsed).is_err());
+
+        let json_null = ToolOutput {
+            stdout: "null\n".to_owned(),
+            ..ToolOutput::default()
+        };
+        assert!(validate_tool_output(&entry, &json_null).is_ok());
     }
 
     #[test]
