@@ -1386,6 +1386,7 @@ pub enum EngineEvent {
     McpAuthorizationFinished {
         tool_name: String,
         result: Result<OAuthConnectionStatus, String>,
+        log_path: Option<String>,
     },
     /// Tools discovered from a server's `tools/list` for bulk import, or the
     /// reason discovery failed.
@@ -2165,21 +2166,51 @@ async fn begin_mcp_oauth(
     endpoint: String,
     client_id: Option<String>,
 ) -> anyhow::Result<()> {
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .map_err(|_| anyhow::anyhow!("could not start the local authorization callback"))?;
-    let port = listener
-        .local_addr()
-        .map_err(|_| anyhow::anyhow!("could not start the local authorization callback"))?
-        .port();
-    let redirect_uri = format!("http://127.0.0.1:{port}{MCP_OAUTH_CALLBACK_PATH}");
-    let facade = McpOAuthFacade::production(&endpoint, client_id)
-        .await
-        .map_err(sanitized_oauth_error)?;
-    let authorization = facade
-        .begin_authorization(&redirect_uri)
-        .await
-        .map_err(sanitized_oauth_error)?;
+    let oauth_log = super::console::CompileConsole::new(
+        "mcp-oauth",
+        Some(&super::console::default_log_dir(&env.paths.data_dir)),
+        None,
+    );
+    let endpoint_origin = oauth_log_endpoint(&endpoint);
+    oauth_log.info(format!(
+        "server={tool_name}; endpoint={endpoint_origin}; outcome=started"
+    ));
+    let setup = async {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .map_err(|_| anyhow::anyhow!("could not start the local authorization callback"))?;
+        let port = listener
+            .local_addr()
+            .map_err(|_| anyhow::anyhow!("could not start the local authorization callback"))?
+            .port();
+        let redirect_uri = format!("http://127.0.0.1:{port}{MCP_OAUTH_CALLBACK_PATH}");
+        let facade = McpOAuthFacade::production(&endpoint, client_id)
+            .await
+            .map_err(sanitized_oauth_error)?;
+        let authorization = facade
+            .begin_authorization(&redirect_uri)
+            .await
+            .map_err(sanitized_oauth_error)?;
+        anyhow::Ok((listener, facade, authorization))
+    }
+    .await;
+    let (listener, facade, authorization) = match setup {
+        Ok(setup) => setup,
+        Err(error) => {
+            let message = format!("{error:#}");
+            oauth_log.close(format!("outcome=failure; error={message}"));
+            env.emit(EngineEvent::McpAuthorizationFinished {
+                tool_name,
+                result: Err(message),
+                log_path: oauth_log
+                    .snapshot()
+                    .log_path
+                    .map(|path| path.display().to_string()),
+            });
+            return Ok(());
+        }
+    };
+    oauth_log.info("authorization URL created; opening browser");
     let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
     env.oauth_cancellations
         .lock()
@@ -2206,8 +2237,25 @@ async fn begin_mcp_oauth(
             .map_err(|error| error.to_string()),
         Err(message) => Err(message),
     };
-    env.emit(EngineEvent::McpAuthorizationFinished { tool_name, result });
+    match &result {
+        Ok(status) => oauth_log.close(format!("outcome=success; status={status:?}")),
+        Err(error) => oauth_log.close(format!("outcome=failure; error={error}")),
+    }
+    env.emit(EngineEvent::McpAuthorizationFinished {
+        tool_name,
+        result,
+        log_path: oauth_log
+            .snapshot()
+            .log_path
+            .map(|path| path.display().to_string()),
+    });
     Ok(())
+}
+
+fn oauth_log_endpoint(endpoint: &str) -> String {
+    reqwest::Url::parse(endpoint)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "<invalid endpoint>".to_owned())
 }
 
 async fn disconnect_mcp_oauth(
@@ -6524,6 +6572,47 @@ mod tests {
             parse_oauth_callback(b"GET /callback?code=one-time HTTP/1.1\r\n\r\n"),
             Err("authorization callback did not include state".to_owned())
         );
+    }
+
+    #[test]
+    fn oauth_log_endpoint_excludes_credentials_path_and_query() {
+        assert_eq!(
+            oauth_log_endpoint("https://user:secret@example.com/private?token=secret"),
+            "https://example.com"
+        );
+        assert_eq!(oauth_log_endpoint("not a URL"), "<invalid endpoint>");
+    }
+
+    #[tokio::test]
+    async fn oauth_setup_failure_emits_error_and_persists_attempt_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        env.evt_tx = evt_tx;
+
+        begin_mcp_oauth(&env, "Example MCP".to_owned(), "not a URL".to_owned(), None)
+            .await
+            .unwrap();
+
+        let event = events
+            .try_iter()
+            .next()
+            .expect("OAuth failure should be reported");
+        let EngineEvent::McpAuthorizationFinished {
+            tool_name,
+            result,
+            log_path,
+        } = event.event
+        else {
+            panic!("expected OAuth completion event");
+        };
+        assert_eq!(tool_name, "Example MCP");
+        assert!(!result.unwrap_err().is_empty());
+        let log_path = log_path.expect("OAuth attempt log should be created");
+        let log = std::fs::read_to_string(log_path).unwrap();
+        assert!(log.contains("server=Example MCP"));
+        assert!(log.contains("endpoint=<invalid endpoint>"));
+        assert!(log.contains("outcome=failure"));
     }
 
     #[tokio::test]

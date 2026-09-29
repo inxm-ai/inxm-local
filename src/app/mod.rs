@@ -1499,7 +1499,11 @@ impl InxmApp {
                 self.mcp.oauth.authorization_url = Some(authorization_url);
                 self.mcp.oauth.connecting = true;
             }
-            EngineEvent::McpAuthorizationFinished { tool_name, result } => {
+            EngineEvent::McpAuthorizationFinished {
+                tool_name,
+                result,
+                log_path,
+            } => {
                 if !mcp_event_targets_draft(&self.mcp, &tool_name) {
                     return;
                 }
@@ -1508,12 +1512,20 @@ impl InxmApp {
                 match result {
                     Ok(status) => {
                         self.mcp.oauth.status = Some(status);
-                        self.mcp.notice = Some("MCP authorization connected.".to_owned());
+                        self.mcp.notice = Some(match log_path {
+                            Some(path) => {
+                                format!("MCP authorization connected. OAuth log: {path}")
+                            }
+                            None => "MCP authorization connected.".to_owned(),
+                        });
                     }
                     Err(message) => {
                         self.mcp.oauth.status =
                             Some(crate::tools::oauth::OAuthConnectionStatus::Disconnected);
-                        self.mcp.error = Some(message);
+                        self.mcp.error = Some(match log_path {
+                            Some(path) => format!("{message}\nOAuth attempt log: {path}"),
+                            None => message,
+                        });
                     }
                 }
             }
@@ -2237,6 +2249,12 @@ impl eframe::App for InxmApp {
             self.mcp_status = status;
         }
         while let Ok(event) = self.events.try_recv() {
+            if let EngineEvent::McpAuthorizationStarted {
+                authorization_url, ..
+            } = &event.event
+            {
+                ctx.open_url(egui::OpenUrl::new_tab(authorization_url.clone()));
+            }
             self.handle_routed_event(event);
         }
         // MCP work has no desktop-engine event to trigger a refresh. Drain
