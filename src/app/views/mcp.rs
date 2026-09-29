@@ -545,16 +545,15 @@ fn describe_section(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             let can_submit = !state.synthesizing && !state.describe_text.trim().is_empty();
-            ui.add_enabled_ui(can_submit, |ui| {
-                if widgets::primary_button(ui, "Generate with AI").clicked() {
-                    engine.send(EngineCommand::SynthesizeTool {
-                        description: state.describe_text.trim().to_owned(),
-                    });
-                    state.synthesizing = true;
-                    state.synth_error = None;
-                    state.notice = None;
-                }
-            });
+            let generate = widgets::primary_button_enabled(ui, "Generate with AI", can_submit);
+            if generate.clicked() {
+                engine.send(EngineCommand::SynthesizeTool {
+                    description: state.describe_text.trim().to_owned(),
+                });
+                state.synthesizing = true;
+                state.synth_error = None;
+                state.notice = None;
+            }
             if state.synthesizing {
                 ui.add_space(6.0);
                 widgets::status_dot(ui, theme::warn(), true);
@@ -881,7 +880,10 @@ fn editor(ui: &mut Ui, state: &mut McpState, engine: &EngineHandle) {
                 .and_then(|discovery| selected_discovered_entries(draft, discovery));
             match pending_selection {
                 Some(Ok(entries)) => {
-                    engine.send(EngineCommand::BulkSaveTools { entries });
+                    engine.send(EngineCommand::BulkSaveTools {
+                        entries,
+                        server_name: draft.name.trim().to_owned(),
+                    });
                     state.importing_tools = true;
                     state.error = None;
                 }
@@ -1152,7 +1154,10 @@ fn bulk_import_section(
             if widgets::primary_button(ui, &format!("Import {selected_count} selected")).clicked() {
                 match built {
                     Ok(entries) => {
-                        engine.send(EngineCommand::BulkSaveTools { entries });
+                        engine.send(EngineCommand::BulkSaveTools {
+                            entries,
+                            server_name: draft.name.trim().to_owned(),
+                        });
                         started = true;
                         *notice = Some("Importing selected tools…".to_owned());
                     }
