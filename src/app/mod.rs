@@ -1388,13 +1388,21 @@ impl InxmApp {
                 self.mcp.notice = Some(format!("Starter catalog restored. Backup: {backup}"));
             }
             EngineEvent::CatalogImportSummary {
+                server_name,
                 imported,
                 unavailable,
             } => {
                 self.mcp.importing_tools = false;
                 self.mcp.discovery = None;
                 self.mcp.draft = None;
-                self.mcp.notice = Some(format!("{imported} imported, {unavailable} unavailable"));
+                let source = if server_name.trim().is_empty() {
+                    "MCP server"
+                } else {
+                    server_name.trim()
+                };
+                self.mcp.notice = Some(format!(
+                    "{source}: {imported} tools imported, {unavailable} tools unavailable"
+                ));
             }
             EngineEvent::ToolSynthesized { entry } => {
                 self.mcp.synthesizing = false;

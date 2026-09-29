@@ -982,6 +982,7 @@ pub enum EngineCommand {
     /// `Catalog` event instead of one per entry. Used by MCP bulk import.
     BulkSaveTools {
         entries: Vec<ToolEntry>,
+        server_name: String,
     },
     /// Answer a plain (non-slash) chat message from context instead of
     /// acting on it. `plan_id` scopes the answer to the chat's attached
@@ -1326,6 +1327,7 @@ pub enum EngineEvent {
         backup: String,
     },
     CatalogImportSummary {
+        server_name: String,
         imported: usize,
         unavailable: usize,
     },
@@ -2130,7 +2132,10 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         EngineCommand::ListMcpServerTools { transport } => {
             list_mcp_server_tools(env, transport).await
         }
-        EngineCommand::BulkSaveTools { entries } => bulk_save_tools(env, entries),
+        EngineCommand::BulkSaveTools {
+            entries,
+            server_name,
+        } => bulk_save_tools(env, entries, server_name),
         EngineCommand::AnswerInsight { question, plan_id } => {
             answer_insight(env, question, plan_id).await
         }
@@ -2238,7 +2243,11 @@ async fn list_mcp_server_tools(env: &EngineEnv, transport: McpTransport) -> anyh
     Ok(())
 }
 
-fn bulk_save_tools(env: &EngineEnv, entries: Vec<ToolEntry>) -> anyhow::Result<()> {
+fn bulk_save_tools(
+    env: &EngineEnv,
+    entries: Vec<ToolEntry>,
+    server_name: String,
+) -> anyhow::Result<()> {
     let (imported, unavailable) =
         env.paths
             .mutations
@@ -2271,6 +2280,7 @@ fn bulk_save_tools(env: &EngineEnv, entries: Vec<ToolEntry>) -> anyhow::Result<(
                 Ok((imported, unavailable))
             })?;
     env.emit(EngineEvent::CatalogImportSummary {
+        server_name,
         imported,
         unavailable,
     });
@@ -6837,7 +6847,12 @@ tools:
 
         let mut invalid = named_http_tool("new-invalid");
         invalid.input_schema = serde_json::json!({"type": ["string", "string"]});
-        bulk_save_tools(&env, vec![named_http_tool("second"), invalid]).unwrap();
+        bulk_save_tools(
+            &env,
+            vec![named_http_tool("second"), invalid],
+            "server".to_owned(),
+        )
+        .unwrap();
         let snapshot =
             crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
         assert!(snapshot.catalog.contains("valid"));
@@ -7042,11 +7057,31 @@ tools:
         let tmp = tempfile::tempdir().unwrap();
         let paths = DataPaths::at(tmp.path().to_owned());
         std::fs::write(&paths.catalog_path, "tools: []\n").unwrap();
-        let env = test_env(paths.clone());
+        let (evt_tx, events) = std::sync::mpsc::channel();
+        let mut env = test_env(paths.clone());
+        env.evt_tx = evt_tx;
         let mut invalid = named_http_tool("invalid");
         invalid.input_schema = serde_json::json!({"type": ["string", "string"]});
-        bulk_save_tools(&env, vec![named_http_tool("good"), invalid.clone()]).unwrap();
-        bulk_save_tools(&env, vec![named_http_tool("good"), invalid]).unwrap();
+        bulk_save_tools(
+            &env,
+            vec![named_http_tool("good"), invalid.clone()],
+            "Example MCP".to_owned(),
+        )
+        .unwrap();
+        bulk_save_tools(
+            &env,
+            vec![named_http_tool("good"), invalid],
+            "Example MCP".to_owned(),
+        )
+        .unwrap();
+        let sources: Vec<_> = events
+            .try_iter()
+            .filter_map(|event| match event.event {
+                EngineEvent::CatalogImportSummary { server_name, .. } => Some(server_name),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sources, ["Example MCP", "Example MCP"]);
         let snapshot =
             crate::tools::catalog::CatalogSnapshot::load_from_file(&paths.catalog_path).unwrap();
         assert!(snapshot.catalog.contains("good"));
