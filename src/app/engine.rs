@@ -1013,6 +1013,7 @@ struct EngineCommandTrace {
     run_id: Option<String>,
     plan_id: Option<String>,
     schedule_id: Option<String>,
+    mcp_tool_name: Option<String>,
 }
 
 impl EngineCommandTrace {
@@ -1085,11 +1086,19 @@ impl EngineCommandTrace {
             }
             _ => None,
         };
+        let mcp_tool_name = match command {
+            EngineCommand::CheckMcpOAuthStatus { tool_name, .. }
+            | EngineCommand::BeginMcpOAuth { tool_name, .. }
+            | EngineCommand::CancelMcpOAuth { tool_name }
+            | EngineCommand::DisconnectMcpOAuth { tool_name, .. } => Some(tool_name.clone()),
+            _ => None,
+        };
         Self {
             command_kind,
             run_id,
             plan_id,
             schedule_id,
+            mcp_tool_name,
         }
     }
 }
@@ -1376,6 +1385,11 @@ pub enum EngineEvent {
         tool_name: String,
         status: OAuthConnectionStatus,
     },
+    /// An OAuth UI command failed; show it in the matching MCP editor draft.
+    McpOAuthOperationFailed {
+        tool_name: String,
+        message: String,
+    },
     /// A user must complete authorization at this URL. It contains no tokens.
     McpAuthorizationStarted {
         tool_name: String,
@@ -1579,6 +1593,7 @@ pub fn spawn_with_activities(
                             );
                             env.emit(command_failure_event(
                                 trace.command_kind,
+                                trace.mcp_tool_name.clone(),
                                 format!("{error:#}"),
                             ));
                         } else {
@@ -2944,10 +2959,20 @@ fn bootstrap(env: &EngineEnv) -> anyhow::Result<()> {
 
 /// The MCP editor waits for tool save/import results; every other failure (chat, runs) may
 /// arrive concurrently with those and must still reach chat.
-fn command_failure_event(command_kind: &str, message: String) -> EngineEvent {
+fn command_failure_event(
+    command_kind: &str,
+    mcp_tool_name: Option<String>,
+    message: String,
+) -> EngineEvent {
     match command_kind {
         "save_tool" | "rename_tool" | "bulk_save_tools" => {
             EngineEvent::CatalogMutationFailed(message)
+        }
+        "mcp_oauth_status" | "mcp_oauth_begin" | "mcp_oauth_cancel" | "mcp_oauth_disconnect" => {
+            match mcp_tool_name {
+                Some(tool_name) => EngineEvent::McpOAuthOperationFailed { tool_name, message },
+                None => EngineEvent::Failure(message),
+            }
         }
         _ => EngineEvent::Failure(message),
     }
@@ -7129,14 +7154,30 @@ tools:
     fn only_tool_mutation_failures_bypass_chat() {
         for kind in ["save_tool", "rename_tool", "bulk_save_tools"] {
             assert!(matches!(
-                command_failure_event(kind, "boom".to_owned()),
+                command_failure_event(kind, None, "boom".to_owned()),
                 EngineEvent::CatalogMutationFailed(_)
             ));
         }
         for kind in ["compile", "delete_tool", "run_plan"] {
             assert!(matches!(
-                command_failure_event(kind, "boom".to_owned()),
+                command_failure_event(kind, None, "boom".to_owned()),
                 EngineEvent::Failure(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn oauth_ui_command_failures_return_to_the_matching_mcp_draft() {
+        for kind in [
+            "mcp_oauth_status",
+            "mcp_oauth_begin",
+            "mcp_oauth_cancel",
+            "mcp_oauth_disconnect",
+        ] {
+            assert!(matches!(
+                command_failure_event(kind, Some("example".to_owned()), "boom".to_owned()),
+                EngineEvent::McpOAuthOperationFailed { tool_name, message }
+                    if tool_name == "example" && message == "boom"
             ));
         }
     }
