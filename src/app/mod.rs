@@ -1487,6 +1487,14 @@ impl InxmApp {
                 self.mcp.oauth.connecting = false;
                 self.mcp.oauth.authorization_url = None;
             }
+            EngineEvent::McpOAuthOperationFailed { tool_name, message } => {
+                if !mcp_event_targets_draft(&self.mcp, &tool_name) {
+                    return;
+                }
+                self.mcp.oauth.connecting = false;
+                self.mcp.oauth.authorization_url = None;
+                self.mcp.error = Some(message);
+            }
             EngineEvent::McpAuthorizationStarted {
                 tool_name,
                 authorization_url,
