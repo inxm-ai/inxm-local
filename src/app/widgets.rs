@@ -201,7 +201,12 @@ struct ButtonStyle {
 
 /// A filled accent button — the primary action in a group.
 pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
-    styled_button(
+    primary_button_enabled(ui, text, true)
+}
+
+/// A primary button whose disabled styling does not inherit egui's opacity fade.
+pub fn primary_button_enabled(ui: &mut Ui, text: &str, enabled: bool) -> Response {
+    styled_button_with_enabled(
         ui,
         text,
         ButtonStyle {
@@ -212,6 +217,7 @@ pub fn primary_button(ui: &mut Ui, text: &str) -> Response {
             text: theme::primary_text(),
             stroke: None,
         },
+        enabled,
     )
 }
 
@@ -249,6 +255,7 @@ pub fn ghost_icon_button(ui: &mut Ui, icon: Icon) -> Response {
             text: theme::text(),
             stroke: Some(Stroke::new(1.0_f32, theme::border())),
         },
+        true,
     );
     if ui.is_rect_visible(response.rect) {
         paint_icon(ui.painter(), response.rect, icon, theme::text());
@@ -275,6 +282,7 @@ pub fn primary_icon_button(ui: &mut Ui, icon: Icon) -> Response {
             text: theme::primary_text(),
             stroke: None,
         },
+        true,
     );
     if ui.is_rect_visible(response.rect) {
         paint_icon(ui.painter(), response.rect, icon, theme::primary_text());
@@ -310,7 +318,7 @@ pub fn wrapped_ghost_button(ui: &mut Ui, text: &str, max_width: f32) -> Response
         width - BUTTON_PADDING.x * 2.0,
     );
     let size = vec2(width, galley.size().y + BUTTON_PADDING.y * 2.0);
-    paint_styled_button(ui, galley, size, style)
+    paint_styled_button(ui, galley, size, style, true)
 }
 
 /// A small filter chip: accent-filled while selected, quiet outline otherwise.
@@ -355,12 +363,27 @@ pub fn danger_button(ui: &mut Ui, text: &str) -> Response {
 }
 
 fn styled_button(ui: &mut Ui, text: &str, style: ButtonStyle) -> Response {
+    styled_button_with_enabled(ui, text, style, true)
+}
+
+fn styled_button_with_enabled(
+    ui: &mut Ui,
+    text: &str,
+    style: ButtonStyle,
+    enabled: bool,
+) -> Response {
     let font = TextStyle::Button.resolve(ui.style());
+    let enabled = enabled && ui.is_enabled();
+    let text_color = if enabled {
+        style.text
+    } else {
+        theme::mix(theme::disabled_text(), theme::text(), 0.5)
+    };
     let galley = ui
         .painter()
-        .layout_no_wrap(text.to_owned(), font, style.text);
+        .layout_no_wrap(text.to_owned(), font, text_color);
     let size = galley.size() + BUTTON_PADDING * 2.0;
-    paint_styled_button(ui, galley, size, style)
+    paint_styled_button(ui, galley, size, style, enabled)
 }
 
 fn paint_styled_button(
@@ -368,11 +391,17 @@ fn paint_styled_button(
     galley: std::sync::Arc<egui::Galley>,
     size: egui::Vec2,
     style: ButtonStyle,
+    enabled: bool,
 ) -> Response {
-    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let enabled = enabled && ui.is_enabled();
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) = ui.allocate_exact_size(size, sense);
 
     if ui.is_rect_visible(rect) {
-        let enabled = response.enabled();
         let hover = ui.ctx().animate_bool_with_time(
             response.id.with("hover"),
             enabled && response.hovered(),
@@ -380,7 +409,7 @@ fn paint_styled_button(
         );
         let hover_fill = theme::mix(style.fill, style.fill_hover, hover);
         let fill = if !enabled {
-            theme::disabled_bg()
+            theme::mix(theme::disabled_bg(), theme::border(), 0.5)
         } else if response.is_pointer_button_down_on() {
             style.fill_pressed
         } else if response.has_focus() {
@@ -417,7 +446,7 @@ fn paint_styled_button(
             StrokeKind::Inside,
         );
         let text_color = if !enabled {
-            theme::disabled_text()
+            theme::mix(theme::disabled_text(), theme::text(), 0.5)
         } else {
             match style.fill == Color32::TRANSPARENT {
                 true => theme::mix(style.text, theme::text(), hover),
@@ -426,7 +455,7 @@ fn paint_styled_button(
         };
         ui.painter()
             .galley(rect.min + BUTTON_PADDING, galley, text_color);
-        if response.hovered() {
+        if enabled && response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
     }
@@ -772,6 +801,31 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn disabled_button_keeps_its_label_visibly_muted() {
+        for dark_mode in [true, false] {
+            let shapes = painted_shapes(dark_mode, |ui| {
+                primary_button_enabled(ui, "Generate with AI", false);
+            });
+            let label_color = shapes.iter().find_map(|shape| match shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Generate with AI" => {
+                    Some(text.fallback_color)
+                }
+                _ => None,
+            });
+            let expected = theme::mix(theme::disabled_text(), theme::text(), 0.5);
+            assert_eq!(label_color, Some(expected), "dark_mode={dark_mode}");
+            let expected_fill = theme::mix(theme::disabled_bg(), theme::border(), 0.5);
+            assert!(
+                shapes.iter().any(|shape| matches!(
+                    shape,
+                    egui::Shape::Rect(rect) if rect.fill == expected_fill
+                )),
+                "dark_mode={dark_mode}: disabled button should have a distinct fill"
+            );
+        }
     }
 
     /// The read-only run-input fields (`plan_card::readonly_input_fields`) are
