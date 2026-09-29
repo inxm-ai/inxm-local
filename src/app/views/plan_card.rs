@@ -220,38 +220,57 @@ pub fn show_workspace(
                             );
                         }
                         for item in runs {
-                            ui.horizontal(|ui| {
-                                let (color, pulsing) = match &item.status {
-                                    RunStatus::Succeeded => (theme::ok(), false),
-                                    RunStatus::Failed { .. } => (theme::err(), false),
-                                    RunStatus::Running => (theme::active(), true),
-                                    RunStatus::WaitingForHuman { .. } => (theme::warn(), true),
-                                    _ => (theme::text_muted(), false),
-                                };
-                                widgets::status_dot(ui, color, pulsing);
-                                ui.label(
-                                    RichText::new(short_id(&item.id))
-                                        .monospace()
-                                        .size(theme::FONT_SMALL)
-                                        .color(theme::text_faint()),
-                                );
-                                ui.label(
-                                    RichText::new(item.status.to_string())
-                                        .size(theme::FONT_SMALL)
-                                        .color(color),
-                                );
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if widgets::ghost_button(ui, "Inspect").clicked() {
-                                        action = Some(WorkspaceAction::InspectRun(item.id.clone()));
-                                    }
-                                    ui.label(
-                                        RichText::new(time::format_local(
-                                            &item.started_at,
-                                            "%b %d, %H:%M",
-                                        ))
-                                        .size(theme::FONT_SMALL)
-                                        .color(theme::text_faint()),
-                                    );
+                            ui.scope(|ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let (color, pulsing) = match &item.status {
+                                        RunStatus::Succeeded => (theme::ok(), false),
+                                        RunStatus::Failed { .. } => (theme::err(), false),
+                                        RunStatus::Running => (theme::active(), true),
+                                        RunStatus::WaitingForHuman { .. } => (theme::warn(), true),
+                                        _ => (theme::text_muted(), false),
+                                    };
+                                    let text_width = (ui.available_width() - 88.0).max(48.0);
+                                    ui.vertical(|ui| {
+                                        ui.set_width(text_width);
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        ui.horizontal(|ui| {
+                                            widgets::status_dot(ui, color, pulsing);
+                                            ui.label(
+                                                RichText::new(short_id(&item.id))
+                                                    .monospace()
+                                                    .size(theme::FONT_SMALL)
+                                                    .color(theme::text_faint()),
+                                            );
+                                            let status_text = item.status.to_string();
+                                            let status = ui.scope(|ui| {
+                                                ui.set_max_width(ui.available_width());
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&status_text)
+                                                            .size(theme::FONT_SMALL)
+                                                            .color(color),
+                                                    )
+                                                    .truncate(),
+                                                )
+                                            });
+                                            status.inner.on_hover_text(status_text);
+                                        });
+                                        ui.label(
+                                            RichText::new(time::format_local(
+                                                &item.started_at,
+                                                "%b %d, %H:%M",
+                                            ))
+                                            .size(theme::FONT_SMALL)
+                                            .color(theme::text_faint()),
+                                        );
+                                    });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if widgets::ghost_button(ui, "Inspect").clicked() {
+                                            action =
+                                                Some(WorkspaceAction::InspectRun(item.id.clone()));
+                                        }
+                                    });
                                 });
                             });
                         }
