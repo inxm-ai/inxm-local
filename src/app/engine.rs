@@ -2353,7 +2353,11 @@ fn bulk_save_tools(
 
 #[derive(Debug, PartialEq, Eq)]
 enum OAuthCallback {
-    Code { code: String, state: String },
+    Code {
+        code: String,
+        state: String,
+        issuer: Option<String>,
+    },
     Denied,
 }
 
@@ -2401,7 +2405,12 @@ fn parse_oauth_callback(request: &[u8]) -> Result<OAuthCallback, String> {
         .filter(|value| !value.is_empty())
         .cloned()
         .ok_or_else(|| "authorization callback did not include state".to_owned())?;
-    Ok(OAuthCallback::Code { code, state })
+    let issuer = values.get("iss").cloned();
+    Ok(OAuthCallback::Code {
+        code,
+        state,
+        issuer,
+    })
 }
 
 async fn complete_callback(
@@ -2412,8 +2421,12 @@ async fn complete_callback(
     callback_state_result(expected_state, &callback)?;
     match callback {
         OAuthCallback::Denied => Err("authorization was denied".to_owned()),
-        OAuthCallback::Code { code, state } => facade
-            .complete_authorization(&code, &state)
+        OAuthCallback::Code {
+            code,
+            state,
+            issuer,
+        } => facade
+            .complete_authorization_with_issuer(&code, &state, issuer.as_deref())
             .await
             .map_err(sanitized_oauth_error)
             .map_err(|error| error.to_string()),
@@ -6583,6 +6596,15 @@ mod tests {
             Ok(OAuthCallback::Code {
                 code: "one-time".to_owned(),
                 state: "csrf".to_owned(),
+                issuer: None,
+            })
+        );
+        assert_eq!(
+            parse_oauth_callback(b"GET /callback?code=one-time&state=csrf&iss=https%3A%2F%2Fmcp.linear.app HTTP/1.1\r\n\r\n"),
+            Ok(OAuthCallback::Code {
+                code: "one-time".to_owned(),
+                state: "csrf".to_owned(),
+                issuer: Some("https://mcp.linear.app".to_owned()),
             })
         );
         assert_eq!(
@@ -6645,6 +6667,7 @@ mod tests {
         let callback = OAuthCallback::Code {
             code: "one-time".to_owned(),
             state: "wrong".to_owned(),
+            issuer: None,
         };
         // The facade is never touched when CSRF state does not match.
         assert_eq!(

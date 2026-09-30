@@ -200,10 +200,21 @@ impl McpOAuthFacade {
         code: &str,
         state_value: &str,
     ) -> Result<(), McpOAuthError> {
+        self.complete_authorization_with_issuer(code, state_value, None)
+            .await
+    }
+
+    /// Complete the flow with the optional RFC 9207 issuer from the redirect.
+    pub async fn complete_authorization_with_issuer(
+        &self,
+        code: &str,
+        state_value: &str,
+        issuer: Option<&str>,
+    ) -> Result<(), McpOAuthError> {
         self.state
             .lock()
             .await
-            .handle_callback(code, state_value)
+            .handle_callback_with_issuer(code, state_value, issuer)
             .await
             .map_err(map_auth_error)
     }
@@ -1015,6 +1026,52 @@ mod tests {
             "rotated-refresh-token"
         );
         assert_eq!(stored["issuer"], "https://auth.example.com");
+    }
+
+    #[tokio::test]
+    async fn advertised_callback_issuer_is_forwarded_to_token_exchange() {
+        let mut responses = discovery_responses();
+        let metadata: serde_json::Value = serde_json::from_slice(&responses[1].body).unwrap();
+        let mut metadata = metadata.as_object().unwrap().clone();
+        metadata.insert(
+            "authorization_response_iss_parameter_supported".to_owned(),
+            serde_json::json!(true),
+        );
+        responses[1] = json_response(serde_json::Value::Object(metadata));
+        responses.push(json_response(serde_json::json!({
+            "access_token": "access-token",
+            "token_type": "bearer"
+        })));
+        let http = Arc::new(ScriptedOAuthHttpClient::new(responses));
+        let facade = McpOAuthFacade::with_boundaries(
+            ENDPOINT,
+            Some("configured-public-client".to_owned()),
+            Arc::new(InMemoryCredentialStore::new()),
+            http.clone(),
+        )
+        .await
+        .unwrap();
+
+        let start = facade
+            .begin_authorization_with_challenge(
+                "http://127.0.0.1:4567/oauth/callback",
+                Some(CHALLENGE),
+            )
+            .await
+            .unwrap();
+        facade
+            .complete_authorization_with_issuer(
+                "one-time-authorization-code",
+                &start.state,
+                Some("https://auth.example.com"),
+            )
+            .await
+            .unwrap();
+        assert!(
+            http.requests()
+                .iter()
+                .any(|request| { request.uri == "https://auth.example.com/token" })
+        );
     }
 
     #[tokio::test]
