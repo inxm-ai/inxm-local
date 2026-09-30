@@ -34,6 +34,18 @@ cargo test --test live_spec_planning -- --ignored
 
 Set `INXM_LOCAL_DATA_DIR` to a temporary or `target/` directory when running an app or MCP process manually. This prevents local plans, schedules, credentials references, and telemetry counters from mixing with a normal installation.
 
+## Native UI screenshots
+
+The desktop screenshot hook captures the viewport after the app has rendered. Build the binary first, then run it with an isolated data directory and a view to inspect:
+
+```sh
+cargo build --bin inxm-local
+INXM_LOCAL_DATA_DIR="$(mktemp -d)" INXM_VIEW=mcp \
+	INXM_SCREENSHOT="$HOME/Desktop/inxm-mcp-review.png" target/debug/inxm-local
+```
+
+`INXM_VIEW` accepts `chat`, `plans`, `runs`, `schedules`, `mcp`, or `settings`. Set `INXM_DEMO=2` to populate the chat workspace without using a compiler key. Wait for `screenshot saved: ...`, then stop the process with Ctrl+C: the window closes after capture, but the tray process may remain running. A screenshot verifies only the rendered state; exercise changed controls in the running app separately and report interactions that could not be verified.
+
 <h2>What's next</h2>
 
 - [Set up the repository](setup.md) if you still need a working development environment.
