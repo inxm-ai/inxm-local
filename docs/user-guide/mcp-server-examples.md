@@ -24,7 +24,6 @@ In this example, INXM Local runs `mcp-remote` locally to connect to GitHub's hos
 2. Create a GitHub PAT with the permissions needed for the tools you plan to use. Replace `ghp_yourTokenHere` in **Server env** with your token. This value is saved in the local tool catalog; protect that file and do not commit it to a repository.
 3. In **MCP Tools**, click **+ Add** and enter the fields above. Click **List tools on server**, then select and import the tools you need. When in doubt, refer to [the guide on local stdio](tools.md#local-stdio).
 
-
 ## Granola
 
 Granola supports browser-based OAuth without a pre-registered client ID.
@@ -57,7 +56,24 @@ Notion's hosted MCP server connects to your workspace through browser-based OAut
 
 1. In **MCP Tools**, click **+ Add** and enter the fields above.
 2. Click **Connect**, then **Open authorization page** when the link appears. Sign in to Notion and authorize access to the workspace you want to use.
-3. Once the connection shows **Connected**, select and import the tools you need. See [Remote HTTP](tools.md#remote-http) for more details.
+3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](tools.md#remote-http) for more details.
+
+## Linear
+
+Linear's hosted MCP server connects to your workspace through browser-based OAuth.
+
+| Field | Value |
+| --- | --- |
+| Kind | MCP server |
+| Transport | Remote HTTP |
+| Name | `Linear` |
+| Remote endpoint | `https://mcp.linear.app/mcp` |
+| Connect with OAuth | Checked |
+| Public client ID | Leave blank |
+
+1. In **MCP Tools**, click **+ Add** and enter the fields above.
+2. Click **Connect**, then **Open authorization page** when the link appears. Sign in to Linear and authorize access to your workspace.
+3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](tools.md#remote-http) for more details.
 
 ## Slack
 
