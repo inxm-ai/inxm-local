@@ -1,0 +1,10 @@
+/* Tint admonitions with their status colour so they stand apart from code blocks. */
+.md :is(.admonition, details.admonition, details) {
+  --callout: var(--fg-tertiary);
+  background: color-mix(in srgb, var(--callout) 8%, var(--bg-surface));
+}
+.md :is(.admonition, details):is(.note, .info, .abstract, .summary) { --callout: var(--status-info); }
+.md :is(.admonition, details):is(.tip, .hint, .success, .check) { --callout: var(--status-ok); }
+.md :is(.admonition, details):is(.warning, .caution, .attention) { --callout: var(--status-warn); }
+.md :is(.admonition, details):is(.danger, .error, .failure, .bug) { --callout: var(--status-error); }
+.md :is(.admonition, details):is(.example, .quote, .question) { --callout: var(--accent); }

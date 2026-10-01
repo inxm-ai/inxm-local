@@ -11,6 +11,9 @@ extra_javascript:
     - assets/mermaid-init.js
 extra_css:
     - assets/mermaid.css
+    - assets/inxm-overrides.css
+markdown_extensions:
+  - admonition
 nav:
   - Home: index.md
   - Getting started:
