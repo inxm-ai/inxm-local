@@ -31,6 +31,9 @@ Use `INXM_LOCAL_DATA_DIR` to isolate local data from an existing installation; `
 INXM_LOCAL_DATA_DIR=target/dev-data cargo run
 ```
 
+!!! note
+	`cargo run` starts INXM Local from your terminal, so it inherits that terminal's full environment, including credentials, and skips the shell-environment import. An app opened from the desktop gets only `PATH` and a fixed set of non-credential variables; see [Tool environment](../reference/configuration.md#tool-environment) for more details.
+
 ## Run without a window
 
 Start the local MCP server and scheduler with:

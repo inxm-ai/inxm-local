@@ -74,6 +74,9 @@ Use this when a native window is unavailable:
 INXM_MCP_ONLY=1 inxm-local
 ```
 
+!!! note
+    Started from a terminal, INXM Local inherits that terminal's full environment, including credentials, and passes it to every tool and AI-generated step it runs. See [Tool environment](configuration.md#tool-environment) for more details.
+
 For a repository self-test, run:
 
 ```sh

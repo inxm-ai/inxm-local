@@ -42,8 +42,12 @@ Use `/schedules` in any chat to list schedules. The Plans view provides controls
 Schedules run only while an INXM Local scheduler is running. Choose how you want to keep it running:
 
 - **Use the desktop app:** Leave **Keep schedules running in the background** enabled in Settings (it is on by default). Closing the window hides INXM Local in the system tray; it does not quit the app. From the tray menu, you can reopen the window, pause or resume all schedules, or quit INXM Local. Pausing does not change each schedule's enabled state.
+    - When started from the desktop app, scheduled runs get no credentials from your shell profile.
 - **Run without the desktop app:** Keep this command running in a terminal or managed process:
 	`inxm-local --headless` or `INXM_HEADLESS=1 inxm-local`
+    - When started from a terminal, scheduled runs get everything in that terminal, including credentials, e.g., `OPENAI_API_KEY`.
+
+Give each scheduled tool the tokens or API keys it needs in its **Env** or **Server env** field. See [Tool environment](../reference/configuration.md#tool-environment) for more details.
 
 Only one INXM Local instance can run schedules for a data directory at a time. If no scheduler is running when a scheduled time passes, that occurrence is skipped; it will not run later as a catch-up.
 

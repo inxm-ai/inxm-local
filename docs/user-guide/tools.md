@@ -18,7 +18,8 @@ In **MCP Tools**, click **+ Add** to create a catalog entry.
 
 Tools imported from an MCP server include their input schemas. When adding a tool manually, use **Input schema (JSON Schema)** to describe the inputs it accepts. In a plan, a `TOOL_CALL` step calls a tool by its catalog name.
 
-Subprocess tools receive inputs as environment variables: `INXM_ARGS` contains the full JSON input, and `INXM_ARG_<NAME>` contains an individual value. Only add commands you trust; they run with the permissions of INXM Local.
+!!! note
+    Subprocess tools and Local stdio MCP servers run programs on your machine with the permissions of INXM Local, so only add commands you trust. Give a tool the tokens or API keys it needs in its **Env** or **Server env** field. INXM Local opened from the desktop does not pass on credentials from your shell profile. See [Tool environment](../reference/configuration.md#tool-environment) for exactly what tools receive.
 
 ### Add MCP server tools
 
