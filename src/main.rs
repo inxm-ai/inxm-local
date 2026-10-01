@@ -38,6 +38,7 @@ fn main() -> eframe::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    inxm_local::hostenv::import_login_shell_env();
 
     // Opening `INXM // Local` while it is already running used to
     // spawn a second process and window instead of surfacing the existing
@@ -137,6 +138,7 @@ fn run_headless() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    inxm_local::hostenv::import_login_shell_env();
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
@@ -202,6 +204,7 @@ fn run_mcp_only() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    inxm_local::hostenv::import_login_shell_env();
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);

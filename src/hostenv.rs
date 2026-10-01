@@ -1,6 +1,6 @@
 //! Host environment detection and cross-platform program resolution.
 //!
-//! Two jobs:
+//! Three jobs:
 //!
 //! 1. **Resolve programs portably.** On Windows, `Command::new("npx")` fails
 //!    because `npx` is `npx.cmd` and `CreateProcess` does not apply
@@ -9,8 +9,14 @@
 //! 2. **Describe the environment to the compiler.** [`EnvProbe`] detects the
 //!    OS and which interpreters/runners exist, so compiled plans only use
 //!    what is actually available (no `bash` steps on a bash-less Windows).
+//! 3. **Adopt the user's shell environment.** [`import_login_shell_env`]
+//!    gives a desktop-launched app the `PATH`, certificate, proxy, and
+//!    runtime variables the user's shell profile exports, but no credentials.
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::Duration;
 
 /// Interpreters probed for CODE_CALL support, in the order they are
 /// preferred as aliases of each other (e.g. `python3` before `python`).
@@ -202,6 +208,367 @@ pub fn augmented_path() -> Option<std::ffi::OsString> {
         }
     }
     std::env::join_paths(dirs).ok()
+}
+
+// ─── Login-shell environment ──────────────────────────────────────────────────
+
+/// Setting this variable (to any value) disables [`import_login_shell_env`].
+pub const SKIP_SHELL_ENV_VAR: &str = "INXM_SKIP_SHELL_ENV";
+
+/// Longest startup wait for the user's shell profile (VS Code's default).
+const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Variables copied from the login shell besides `PATH`: certificate, proxy,
+/// locale, and runtime locations that decide whether tools can run at all.
+/// Credentials are deliberately absent, so profile secrets never reach
+/// AI-generated steps; tools that need one get it from their own env.
+const IMPORTED_SHELL_VARS: &[&str] = &[
+    // TLS trust
+    "NODE_EXTRA_CA_CERTS",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    // Proxies
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    "all_proxy",
+    // Locale
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    // Runtime and version-manager locations
+    "JAVA_HOME",
+    "GOPATH",
+    "GOROOT",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "DOTNET_ROOT",
+    "NVM_DIR",
+    "NVM_BIN",
+    "VOLTA_HOME",
+    "PNPM_HOME",
+    "BUN_INSTALL",
+    "PYENV_ROOT",
+    "ASDF_DIR",
+    "ASDF_DATA_DIR",
+    "MISE_DATA_DIR",
+];
+
+/// Adopt the parts of the user's shell profile environment that tools need
+/// to run: `PATH` plus [`IMPORTED_SHELL_VARS`].
+///
+/// Desktop launches (Finder, Dock, Start menu, login items, `.desktop` files,
+/// GUI MCP clients) do not run shell startup files, so values such as
+/// Homebrew or nvm `PATH` entries and `NODE_EXTRA_CA_CERTS` are otherwise
+/// missing. Variables the process already has always win, and only `PATH`
+/// is merged. On Unix the shell's `PATH` order comes first because the
+/// inherited desktop `PATH` is a bare system default. On Windows the
+/// inherited `PATH` comes first because it is the user's registry
+/// configuration.
+///
+/// Must run before any other thread starts, because it writes the process
+/// environment.
+pub fn import_login_shell_env() {
+    if std::env::var_os(SKIP_SHELL_ENV_VAR).is_some() {
+        tracing::info!(
+            operation = "hostenv.shell_env",
+            outcome = "skipped",
+            reason = SKIP_SHELL_ENV_VAR,
+            "login shell environment not imported"
+        );
+        return;
+    }
+    // A terminal launch already carries the shell's environment.
+    if cfg!(unix) && std::env::var_os("TERM").is_some() {
+        tracing::debug!(
+            operation = "hostenv.shell_env",
+            outcome = "skipped",
+            reason = "launched from a terminal",
+            "login shell environment not imported"
+        );
+        return;
+    }
+
+    let marker = format!("INXM_ENV_{}", uuid::Uuid::new_v4().simple());
+    let shell_vars = match capture_shell_env(
+        login_shell_command(&marker),
+        &marker,
+        SHELL_ENV_TIMEOUT,
+    ) {
+        Ok(vars) => vars,
+        Err(error) => {
+            tracing::warn!(
+                operation = "hostenv.shell_env",
+                outcome = "failure",
+                error = %error,
+                "could not import the login shell environment; launched tools keep the app's environment"
+            );
+            return;
+        }
+    };
+    let inherited: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
+        .collect();
+    let updates = merge_shell_env(&inherited, &shell_vars, cfg!(unix));
+    let variables = updates
+        .iter()
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    for (key, value) in &updates {
+        // SAFETY: `main` calls this before starting any thread that touches
+        // the environment; the capture threads only read a pipe or reap.
+        unsafe { std::env::set_var(key, value) };
+    }
+    tracing::info!(
+        operation = "hostenv.shell_env",
+        outcome = "success",
+        variables = %variables,
+        "imported login shell environment"
+    );
+}
+
+/// `$SHELL` as an interactive login shell, printing its environment
+/// NUL-delimited between two `marker` lines.
+#[cfg(unix)]
+fn login_shell_command(marker: &str) -> Command {
+    let shell = std::env::var_os("SHELL")
+        .filter(|shell| !shell.is_empty())
+        .unwrap_or_else(|| "/bin/sh".into());
+    let name = Path::new(&shell)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut command = Command::new(&shell);
+    command.args(login_shell_flags(&name));
+    command.arg(format!("echo {marker}; /usr/bin/env -0; echo {marker}"));
+    command
+}
+
+/// csh and tcsh accept `-l` only as their sole flag.
+#[cfg(unix)]
+fn login_shell_flags(shell_name: &str) -> &'static [&'static str] {
+    match shell_name {
+        "csh" | "tcsh" => &["-i", "-c"],
+        _ => &["-i", "-l", "-c"],
+    }
+}
+
+/// PowerShell with the user's profile, printing its environment
+/// NUL-delimited between two `marker` strings.
+#[cfg(windows)]
+fn login_shell_command(marker: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let shell = find_on_path("pwsh").unwrap_or_else(|| PathBuf::from("powershell.exe"));
+    let mut command = Command::new(shell);
+    command.args(["-NoLogo", "-NonInteractive", "-Command"]);
+    command.arg(format!(
+        "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; \
+         [Console]::Out.Write('{marker}'); \
+         Get-ChildItem env: | ForEach-Object {{ [Console]::Out.Write($_.Name + '=' + $_.Value + [char]0) }}; \
+         [Console]::Out.Write('{marker}')"
+    ));
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+/// Run `command` and parse the environment it prints between two `marker`
+/// strings, killing it if that takes longer than `timeout`.
+fn capture_shell_env(
+    mut command: Command,
+    marker: &str,
+    timeout: Duration,
+) -> Result<Vec<(String, String)>, String> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid(2) is async-signal-safe. A new session has no
+        // controlling terminal, so an interactive shell cannot stop on terminal
+        // I/O, and it leads its own process group for `kill_shell`.
+        unsafe {
+            command.pre_exec(|| {
+                if setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not start the login shell: {error}"))?;
+    let mut stdout = child.stdout.take().expect("stdout is piped");
+    let end_marker = marker.as_bytes().to_vec();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    // Stop at the closing marker rather than EOF: a background job started by
+    // the profile can hold stdout open indefinitely.
+    std::thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut buffer = [0_u8; 8192];
+        let result = loop {
+            match stdout.read(&mut buffer) {
+                Ok(0) => break Ok(output),
+                Ok(read) => {
+                    output.extend_from_slice(&buffer[..read]);
+                    if occurrences(&output, &end_marker) >= 2 {
+                        break Ok(output);
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(error) => break Err(error),
+            }
+        };
+        let _ = sender.send(result);
+    });
+
+    match receiver.recv_timeout(timeout) {
+        Ok(Ok(output)) => {
+            // Reap without killing, so jobs the profile backgrounds keep running.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            parse_shell_env_output(&output, marker)
+        }
+        Ok(Err(error)) => {
+            kill_shell(&mut child);
+            Err(format!("could not read the login shell output: {error}"))
+        }
+        Err(_) => {
+            kill_shell(&mut child);
+            Err(format!("the login shell did not finish within {timeout:?}"))
+        }
+    }
+}
+
+fn kill_shell(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(child.id()) {
+        // SAFETY: kill(2) has no memory-safety preconditions. The shell leads
+        // its own process group, so a negative pid also stops its children.
+        unsafe {
+            kill(-group, SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+    fn setsid() -> i32;
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
+    haystack
+        .windows(needle.len())
+        .filter(|window| *window == needle)
+        .count()
+}
+
+/// Extract `KEY=VALUE` pairs from the NUL-delimited block between the first
+/// two `marker`s, ignoring anything the profile printed around it.
+fn parse_shell_env_output(output: &[u8], marker: &str) -> Result<Vec<(String, String)>, String> {
+    let marker = marker.as_bytes();
+    let start =
+        find_bytes(output, marker).ok_or("the login shell printed no environment")? + marker.len();
+    let rest = &output[start..];
+    let end =
+        find_bytes(rest, marker).ok_or("the login shell environment output was incomplete")?;
+    let block = &rest[..end];
+    if !block.contains(&0) {
+        return Err("the login shell environment output was not NUL-delimited".to_owned());
+    }
+    let leading_newlines = block
+        .iter()
+        .take_while(|byte| matches!(byte, b'\r' | b'\n'))
+        .count();
+    Ok(block[leading_newlines..]
+        .split(|byte| *byte == 0)
+        .filter_map(|entry| {
+            let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
+            (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
+        })
+        .collect())
+}
+
+fn env_key_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
+/// The variables to set so the process gains what `shell` adds to
+/// `inherited`: missing [`IMPORTED_SHELL_VARS`] are added, existing ones are
+/// kept, and `PATH` becomes the de-duplicated union with `shell` entries
+/// first when `shell_path_first` is true. Everything else is ignored.
+fn merge_shell_env(
+    inherited: &[(String, String)],
+    shell: &[(String, String)],
+    shell_path_first: bool,
+) -> Vec<(String, String)> {
+    let lookup = |vars: &[(String, String)], wanted: &str| {
+        vars.iter()
+            .find(|(key, _)| env_key_eq(key, wanted))
+            .map(|(_, value)| value.clone())
+    };
+    let mut updates: Vec<(String, String)> = shell
+        .iter()
+        .filter(|(key, _)| {
+            IMPORTED_SHELL_VARS
+                .iter()
+                .any(|allowed| env_key_eq(key, allowed))
+        })
+        .filter(|(key, _)| lookup(inherited, key).is_none())
+        .cloned()
+        .collect();
+
+    if let Some(shell_path) = lookup(shell, "PATH") {
+        let inherited_path = lookup(inherited, "PATH");
+        let inherited_value = inherited_path.clone().unwrap_or_default();
+        let (first, second) = if shell_path_first {
+            (shell_path, inherited_value)
+        } else {
+            (inherited_value, shell_path)
+        };
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for dir in std::env::split_paths(&first).chain(std::env::split_paths(&second)) {
+            if !dir.as_os_str().is_empty() && !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        if let Some(merged) = std::env::join_paths(dirs)
+            .ok()
+            .and_then(|merged| merged.into_string().ok())
+            && inherited_path.as_ref() != Some(&merged)
+        {
+            updates.push(("PATH".to_owned(), merged));
+        }
+    }
+    updates
 }
 
 /// Verify that an interpreter can actually be spawned by attempting to start
@@ -536,5 +903,164 @@ mod tests {
             !interpreter_actually_spawns(&path),
             "an empty file must not be reported as spawnable"
         );
+    }
+
+    fn vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_shell_env_output_ignores_profile_noise() {
+        let output = b"Welcome!\nMARK\nA=1\0NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem\0MULTI=x\ny\0=C:=C:\\\0MARK\nbye\n";
+        let parsed = parse_shell_env_output(output, "MARK").unwrap();
+        assert_eq!(
+            parsed,
+            vars(&[
+                ("A", "1"),
+                ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem"),
+                ("MULTI", "x\ny"),
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_shell_env_output_rejects_missing_or_malformed_blocks() {
+        assert!(parse_shell_env_output(b"no markers", "MARK").is_err());
+        assert!(parse_shell_env_output(b"MARK\nA=1\0", "MARK").is_err());
+        assert!(parse_shell_env_output(b"MARK\nA=1\nB=2\nMARK\n", "MARK").is_err());
+    }
+
+    #[test]
+    fn merge_imports_only_allowlisted_variables_and_keeps_inherited_ones() {
+        let inherited = vars(&[("HOME", "/Users/me"), ("LANG", "de_DE.UTF-8")]);
+        let shell = vars(&[
+            ("HOME", "/Users/me"),
+            ("LANG", "en_US.UTF-8"),
+            ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem"),
+            ("HTTPS_PROXY", "http://proxy:8080"),
+            ("GITHUB_TOKEN", "ghp_secret"),
+            ("OPENAI_API_KEY", "sk-secret"),
+            ("AWS_SECRET_ACCESS_KEY", "secret"),
+            ("PWD", "/Users/me"),
+        ]);
+        let updates = merge_shell_env(&inherited, &shell, true);
+        assert_eq!(
+            updates,
+            vars(&[
+                ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem"),
+                ("HTTPS_PROXY", "http://proxy:8080"),
+            ])
+        );
+    }
+
+    #[test]
+    fn imported_variables_exclude_credentials() {
+        for var in IMPORTED_SHELL_VARS {
+            let upper = var.to_ascii_uppercase();
+            assert!(
+                ["TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH"]
+                    .iter()
+                    .all(|word| !upper.contains(word)),
+                "{var} looks like a credential"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_puts_shell_path_first_without_duplicates() {
+        let inherited = vars(&[("PATH", "/usr/bin:/bin:/custom")]);
+        let shell = vars(&[("PATH", "/opt/homebrew/bin:/usr/bin:/bin")]);
+        let updates = merge_shell_env(&inherited, &shell, true);
+        assert_eq!(
+            updates,
+            vars(&[("PATH", "/opt/homebrew/bin:/usr/bin:/bin:/custom")])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_can_keep_inherited_path_first() {
+        let inherited = vars(&[("PATH", "/registry/bin:/usr/bin")]);
+        let shell = vars(&[("PATH", "/profile/bin:/usr/bin")]);
+        let updates = merge_shell_env(&inherited, &shell, false);
+        assert_eq!(
+            updates,
+            vars(&[("PATH", "/registry/bin:/usr/bin:/profile/bin")])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merge_leaves_identical_path_alone() {
+        let path = vars(&[("PATH", "/usr/bin:/bin")]);
+        assert!(merge_shell_env(&path, &path, true).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_shell_flags_avoid_combined_login_flag_for_csh() {
+        assert_eq!(login_shell_flags("zsh"), &["-i", "-l", "-c"]);
+        assert_eq!(login_shell_flags("fish"), &["-i", "-l", "-c"]);
+        assert_eq!(login_shell_flags("tcsh"), &["-i", "-c"]);
+    }
+
+    #[cfg(unix)]
+    fn fake_shell(script: &str) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg(script);
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_reads_environment_printed_between_markers() {
+        let script = "echo 'profile banner'; echo MARK; \
+                      printf 'A=1\\000NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem\\000'; echo MARK";
+        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            parsed,
+            vars(&[("A", "1"), ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem")])
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_does_not_wait_for_background_jobs_holding_stdout() {
+        let script = "sleep 5 & echo MARK; printf 'A=1\\000'; echo MARK; wait";
+        let started = std::time::Instant::now();
+        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(4)).unwrap();
+        assert_eq!(parsed, vars(&[("A", "1")]));
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_detaches_the_shell_from_the_terminal() {
+        // Under a terminal, reading /dev/tty from a background group would stop the shell.
+        let script = "cat /dev/tty >/dev/null 2>&1; echo MARK; printf 'A=1\\000'; echo MARK";
+        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(3)).unwrap();
+        assert_eq!(parsed, vars(&[("A", "1")]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_times_out_and_kills_a_hanging_shell() {
+        let started = std::time::Instant::now();
+        let error = capture_shell_env(fake_shell("sleep 30"), "MARK", Duration::from_millis(300))
+            .unwrap_err();
+        assert!(error.contains("did not finish"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_reports_a_failing_shell() {
+        let error =
+            capture_shell_env(fake_shell("exit 3"), "MARK", Duration::from_secs(5)).unwrap_err();
+        assert!(error.contains("printed no environment"), "{error}");
     }
 }

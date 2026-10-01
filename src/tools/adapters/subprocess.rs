@@ -12,7 +12,9 @@
 
 use crate::error::ToolError;
 use crate::tools::ToolOutput;
-use crate::tools::adapters::process::{ProcessGroupGuard, isolate_process_group, kill_and_reap};
+use crate::tools::adapters::process::{
+    ProcessGroupGuard, environment_hint, isolate_process_group, kill_and_reap,
+};
 use crate::tools::catalog::SubprocessConfig;
 use indexmap::IndexMap;
 use std::time::Duration;
@@ -72,6 +74,11 @@ async fn execute(
     // compatibility with tools that consumed it that way.
     if let Some(dynamic_args) = arguments.get("args").and_then(serde_json::Value::as_array) {
         cmd.args(dynamic_args.iter().map(json_value_to_str));
+    }
+
+    // A shebang such as `#!/usr/bin/env node` searches the child's PATH; the tool's env still wins.
+    if let Some(path) = crate::hostenv::augmented_path() {
+        cmd.env("PATH", path);
     }
 
     // Static env vars from the tool definition.
@@ -286,9 +293,12 @@ fn interpret_output(
     capture_status: bool,
 ) -> Result<ToolOutput, ToolError> {
     if !capture_status && exit_code != 0 {
+        let hint = environment_hint(&stderr)
+            .map(|hint| format!(" — {hint}"))
+            .unwrap_or_default();
         return Err(ToolError::Execution {
             tool: command.to_owned(),
-            message: format!("exited with code {exit_code}: {stderr}"),
+            message: format!("exited with code {exit_code}: {stderr}{hint}"),
         });
     }
 
@@ -403,6 +413,16 @@ mod tests {
             }
             other => panic!("expected Execution error, got: {other}"),
         }
+    }
+
+    #[test]
+    fn missing_shebang_interpreter_exit_carries_an_environment_hint() {
+        let stderr = "env: node: No such file or directory\n".to_owned();
+        let err = interpret_output("npx", String::new(), stderr, 127, false).unwrap_err();
+        assert!(
+            err.to_string().contains("hint: `node` is not on the PATH"),
+            "{err}"
+        );
     }
 
     #[test]
