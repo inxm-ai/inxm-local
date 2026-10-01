@@ -6,7 +6,7 @@ Use these checks to diagnose common setup and workflow issues.
 
 ## The compiler is not configured
 
-Open **Settings -> Compiler** and choose a backend. For automatic API-key selection, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` before starting the app. Account-backed connections require the corresponding `codex` or `claude` CLI to be installed and signed in.
+Open **Settings -> Compiler** and choose a backend. For automatic API-key selection, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` before starting the app for more details. Account-backed connections require the corresponding `codex` or `claude` CLI to be installed and signed in.
 
 ## The MCP server cannot bind its port
 
@@ -19,3 +19,9 @@ Start authorization from **MCP Tools -> Connect** while the desktop app is avail
 ## A schedule does not fire
 
 Check that the schedule is enabled and that either the desktop app is allowed to keep running in the tray or `inxm-local --headless` is running. A second process using the same data directory will not start a duplicate scheduler.
+
+## A tool works in a terminal but fails in the app
+
+INXM Local does not pass tokens or API keys from your shell profile to tools. A tool that depends on one may work in your terminal but fail in the app. A GitHub MCP server, for example, fails to authenticate when `GITHUB_TOKEN` is set only in your shell profile.
+Add the variable to the tool's **Env** or **Server env** field, such as `GITHUB_TOKEN=ghp_yourTokenHere`, and try again.
+See [Tool environment](../reference/configuration.md#tool-environment) for what tools receive.
