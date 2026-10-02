@@ -1,11 +1,52 @@
 //! Shared child-process lifecycle helpers for tool adapters.
 
+use regex::Regex;
 use std::io;
 use std::process::ExitStatus;
+use std::sync::LazyLock;
 use tokio::process::{Child, Command};
 
 #[cfg(unix)]
 const SIGKILL: i32 = 9;
+
+/// Error codes Node.js and Python print when a TLS certificate chain cannot
+/// be verified, typically because a custom CA is not configured.
+const CERTIFICATE_ERRORS: &[&str] = &[
+    "UNABLE_TO_GET_ISSUER_CERT",
+    "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+    "SELF_SIGNED_CERT_IN_CHAIN",
+    "DEPTH_ZERO_SELF_SIGNED_CERT",
+    "CERTIFICATE_VERIFY_FAILED",
+];
+
+/// `env` failing to find a shebang interpreter, in BSD/macOS
+/// (`env: node: No such…`) and GNU (`/usr/bin/env: ‘node’: No such…`) forms.
+static MISSING_INTERPRETER: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"env: ['‘"]?([^\s'’":]+)['’"]?: No such file or directory"#).expect("valid regex")
+});
+
+/// An actionable hint when a child's stderr shows it is missing part of the
+/// user's environment.
+pub(super) fn environment_hint(stderr: &str) -> Option<String> {
+    if let Some(captures) = MISSING_INTERPRETER.captures(stderr) {
+        return Some(format!(
+            "hint: `{}` is not on the PATH this tool runs with. Add its directory to PATH in \
+             your shell profile and restart INXM Local, or set PATH in this tool's environment \
+             variables.",
+            &captures[1]
+        ));
+    }
+    CERTIFICATE_ERRORS
+        .iter()
+        .any(|code| stderr.contains(code))
+        .then(|| {
+            "hint: the TLS certificate could not be verified. If your network uses a custom \
+             certificate authority, export NODE_EXTRA_CA_CERTS (Node.js) or SSL_CERT_FILE \
+             (Python) in your shell profile and restart INXM Local, or set it in this tool's \
+             environment variables."
+                .to_owned()
+        })
+}
 
 /// Put the child in an isolated process group where the platform supports it.
 ///
@@ -82,4 +123,37 @@ pub(super) async fn kill_and_reap(
 #[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_missing_shebang_interpreter_in_bsd_and_gnu_forms() {
+        for stderr in [
+            "env: node: No such file or directory\n",
+            "/usr/bin/env: ‘node’: No such file or directory\n",
+            "/usr/bin/env: 'node': No such file or directory\n",
+        ] {
+            let hint = environment_hint(stderr).expect(stderr);
+            assert!(hint.contains("`node` is not on the PATH"), "{hint}");
+        }
+    }
+
+    #[test]
+    fn hints_certificate_errors() {
+        let stderr = "Error: unable to get local issuer certificate\n  code: 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY'";
+        let hint = environment_hint(stderr).unwrap();
+        assert!(hint.contains("NODE_EXTRA_CA_CERTS"), "{hint}");
+    }
+
+    #[test]
+    fn unrelated_failures_get_no_hint() {
+        assert_eq!(
+            environment_hint("Error: ENOENT: no such file or directory, open 'x'"),
+            None
+        );
+        assert_eq!(environment_hint(""), None);
+    }
 }

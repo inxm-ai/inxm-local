@@ -19,3 +19,9 @@ Start authorization from **MCP Tools -> Connect** while the desktop app is avail
 ## A schedule does not fire
 
 Check that the schedule is enabled and that either the desktop app is allowed to keep running in the tray or `inxm-local --headless` is running. A second process using the same data directory will not start a duplicate scheduler.
+
+## A tool works in a terminal but fails in the app
+
+When opened from the desktop, INXM Local does not pass tokens or API keys from your shell profile to tools. A tool that depends on one may work in your terminal but fail in the app. A GitHub MCP server, for example, fails to authenticate when `GITHUB_TOKEN` is set only in your shell profile. The same applies to a proxy variable whose URL contains a username or password, such as `HTTPS_PROXY=http://user:password@proxy:8080`. Started from a terminal, INXM Local passes on that terminal's full environment, including credentials.
+Add the variable to the tool's **Env** or **Server env** field, such as `GITHUB_TOKEN=ghp_yourTokenHere`, and try again.
+See [Tool environment](../reference/configuration.md#tool-environment) for what tools receive.

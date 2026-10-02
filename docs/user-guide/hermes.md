@@ -23,6 +23,9 @@ Before configuring the integration:
 3. Install and start INXM Local from the latest GitHub release.
 4. Configure any compiler API key required by INXM Local.
 
+!!! note
+    A working terminal test does not guarantee that Hermes works from INXM Local. When INXM Local is opened from the desktop, it does not pass credentials from your shell profile to Hermes. If Hermes reads its model-provider API key from an environment variable you export in your shell profile, add that variable to the Hermes tool's `env` instead. See [Tool environment](../reference/configuration.md#tool-environment) for more details.
+
 On Windows, Hermes and INXM Local can both run natively. If INXM Local cannot find the `hermes` command, use the absolute path to the Hermes executable in the tool configuration.
 
 ## Run Hermes agents from INXM Local
@@ -369,6 +372,14 @@ Do not expose the unauthenticated MCP endpoint directly to a LAN or the public i
 - Reduce the Hermes profile's maximum iterations.
 - Make the prompt bounded and self-contained.
 - Ensure Hermes is not waiting for an interactive approval. Scripted workers should use a profile whose approval behavior is appropriate for unattended execution.
+
+---
+
+### Hermes works in a terminal but fails authentication from INXM Local
+
+- INXM Local opened from the desktop does not pass API keys or tokens from your shell profile.
+- Add the variable Hermes needs, such as its model-provider API key, to the Hermes tool's `env` in `tools.yaml` or in **MCP Tools**.
+- Alternatively, store the key in Hermes's own configuration so it does not depend on your shell environment.
 
 ---
 

@@ -18,7 +18,9 @@
 
 use crate::error::ToolError;
 use crate::tools::ToolOutput;
-use crate::tools::adapters::process::{ProcessGroupGuard, isolate_process_group, kill_and_reap};
+use crate::tools::adapters::process::{
+    ProcessGroupGuard, environment_hint, isolate_process_group, kill_and_reap,
+};
 use crate::tools::catalog::{McpConfig, McpDiscoveredTool, McpTransport};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -244,6 +246,10 @@ async fn run_stdio_session<T>(
 ) -> Result<T, ToolError> {
     // PATH/PATHEXT-aware resolution: finds `npx.cmd`/`uvx.exe` on Windows.
     let mut command = Command::new(crate::hostenv::resolve_program(server_command));
+    // A shebang such as `#!/usr/bin/env node` searches the child's PATH; Server env still wins.
+    if let Some(path) = crate::hostenv::augmented_path() {
+        command.env("PATH", path);
+    }
     command
         .args(server_args)
         .envs(server_env.iter())
@@ -374,7 +380,7 @@ async fn run_stdio_session<T>(
         });
     }
 
-    outcome.map_err(|err| attach_stderr(err, &stderr_output.text))
+    outcome.map_err(|err| attach_stderr(err, tool_label, &stderr_output.text))
 }
 
 /// Runs the MCP lifecycle over an already-spawned child's stdio:
@@ -804,16 +810,25 @@ fn collect_stderr(
         .map_err(ToolError::Io)
 }
 
-/// Appends captured stderr to an `Execution` error's message, if any was captured.
-fn attach_stderr(err: ToolError, stderr: &str) -> ToolError {
+/// Appends captured stderr, and an environment hint when one applies, to a
+/// failed session's error.
+fn attach_stderr(err: ToolError, tool: &str, stderr: &str) -> ToolError {
     let stderr = stderr.trim();
     if stderr.is_empty() {
         return err;
     }
+    let hint = environment_hint(stderr)
+        .map(|hint| format!(" — {hint}"))
+        .unwrap_or_default();
     match err {
         ToolError::Execution { tool, message } => ToolError::Execution {
             tool,
-            message: format!("{message} — stderr: {stderr}"),
+            message: format!("{message} — stderr: {stderr}{hint}"),
+        },
+        // A server that exits at once breaks the pipe; its stderr says why.
+        ToolError::Io(error) => ToolError::Execution {
+            tool: tool.to_owned(),
+            message: format!("I/O error: {error} — stderr: {stderr}{hint}"),
         },
         other => other,
     }
@@ -999,20 +1014,100 @@ mod tests {
             tool: "write-file".to_owned(),
             message: "invalid JSON-RPC response: EOF — raw: ".to_owned(),
         };
-        let with_stderr = attach_stderr(err, "Error: ENOENT: no such file or directory\n");
+        let with_stderr = attach_stderr(
+            err,
+            "write-file",
+            "Error: ENOENT: no such file or directory\n",
+        );
         match with_stderr {
             ToolError::Execution { message, .. } => {
                 assert!(message.contains("stderr: Error: ENOENT"));
+                assert!(!message.contains("hint:"));
             }
             _ => panic!("expected Execution variant"),
         }
     }
 
     #[test]
+    fn attach_stderr_explains_a_broken_pipe_with_a_hint() {
+        let err = ToolError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        let with_stderr =
+            attach_stderr(err, "tools/list", "env: node: No such file or directory\n");
+        match with_stderr {
+            ToolError::Execution { tool, message } => {
+                assert_eq!(tool, "tools/list");
+                assert!(message.contains("stderr: env: node: No such file or directory"));
+                assert!(message.contains("hint: `node` is not on the PATH"));
+            }
+            other => panic!("expected Execution variant, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn attach_stderr_is_noop_when_empty() {
         let err = ToolError::timeout("write-file", 30);
-        let unchanged = attach_stderr(err, "   \n");
+        let unchanged = attach_stderr(err, "write-file", "   \n");
         assert!(matches!(unchanged, ToolError::Timeout { .. }));
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, contents: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, contents).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_shebang_interpreter_reports_an_environment_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = temp.path().join("server");
+        write_executable(&server, "#!/usr/bin/env inxm-missing-interpreter-xyz\n");
+        let transport = McpTransport::Stdio {
+            server_command: server.to_string_lossy().into_owned(),
+            server_args: Vec::new(),
+            server_env: IndexMap::new(),
+        };
+
+        let error = list_tools(&transport, Some(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("hint: `inxm-missing-interpreter-xyz` is not on the PATH"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn server_env_path_lets_a_shebang_find_its_interpreter() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        write_executable(
+            &bin.join("inxm-fake-interpreter"),
+            "#!/bin/sh\necho interpreter-ran >&2\n",
+        );
+        let server = temp.path().join("server");
+        write_executable(&server, "#!/usr/bin/env inxm-fake-interpreter\n");
+        let transport = McpTransport::Stdio {
+            server_command: server.to_string_lossy().into_owned(),
+            server_args: Vec::new(),
+            server_env: [(
+                "PATH".to_owned(),
+                format!("{}:/usr/bin:/bin", bin.display()),
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let error = list_tools(&transport, Some(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("interpreter-ran"), "{error}");
+        assert!(!error.contains("hint:"), "{error}");
     }
 
     #[cfg(unix)]

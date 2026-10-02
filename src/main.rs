@@ -67,6 +67,10 @@ fn main() -> eframe::Result<()> {
             None
         }
     };
+    // After the single-instance check, so a secondary launch exits without
+    // running the user's shell profile, and before `run_native` starts any
+    // thread, because the import writes the process environment.
+    inxm_local::hostenv::import_login_shell_env();
 
     // `--start-hidden` is what login/startup entries pass: create the window
     // invisible so the app comes up in the system tray only — the same state
@@ -137,6 +141,7 @@ fn run_headless() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    inxm_local::hostenv::import_login_shell_env();
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
@@ -202,6 +207,7 @@ fn run_mcp_only() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+    inxm_local::hostenv::import_login_shell_env();
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
