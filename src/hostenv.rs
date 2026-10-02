@@ -221,7 +221,8 @@ const SHELL_ENV_TIMEOUT: Duration = Duration::from_secs(10);
 /// Variables copied from the login shell besides `PATH`: certificate, proxy,
 /// locale, and runtime locations that decide whether tools can run at all.
 /// Credentials are deliberately absent, so profile secrets never reach
-/// AI-generated steps; tools that need one get it from their own env.
+/// AI-generated steps; tools that need one get it from their own env. For the
+/// same reason a proxy URL that embeds `user:password@` is not copied.
 const IMPORTED_SHELL_VARS: &[&str] = &[
     // TLS trust
     "NODE_EXTRA_CA_CERTS",
@@ -296,11 +297,8 @@ pub fn import_login_shell_env() {
     }
 
     let marker = format!("INXM_ENV_{}", uuid::Uuid::new_v4().simple());
-    let shell_vars = match capture_shell_env(
-        login_shell_command(&marker),
-        &marker,
-        SHELL_ENV_TIMEOUT,
-    ) {
+    let (command, stdin_script) = login_shell_command(&marker);
+    let shell_vars = match capture_shell_env(command, stdin_script, &marker, SHELL_ENV_TIMEOUT) {
         Ok(vars) => vars,
         Err(error) => {
             tracing::warn!(
@@ -316,6 +314,24 @@ pub fn import_login_shell_env() {
         .filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?)))
         .collect();
     let updates = merge_shell_env(&inherited, &shell_vars, cfg!(unix));
+    let skipped_proxies = shell_vars
+        .iter()
+        .filter(|(key, value)| is_proxy_var(key) && proxy_has_credentials(value))
+        .filter(|(key, _)| {
+            IMPORTED_SHELL_VARS
+                .iter()
+                .any(|allowed| env_key_eq(key, allowed))
+        })
+        .map(|(key, _)| key.as_str())
+        .collect::<Vec<_>>();
+    if !skipped_proxies.is_empty() {
+        tracing::warn!(
+            operation = "hostenv.shell_env",
+            outcome = "partial",
+            variables = %skipped_proxies.join(","),
+            "proxy variables with embedded credentials were not imported; set them on the tools that need them"
+        );
+    }
     let variables = updates
         .iter()
         .map(|(key, _)| key.as_str())
@@ -334,36 +350,41 @@ pub fn import_login_shell_env() {
     );
 }
 
-/// `$SHELL` as an interactive login shell, printing its environment
-/// NUL-delimited between two `marker` lines.
+/// `$SHELL` as a login shell, printing its environment between two `marker`
+/// lines, plus the script to write to its stdin, if any.
 #[cfg(unix)]
-fn login_shell_command(marker: &str) -> Command {
+fn login_shell_command(marker: &str) -> (Command, Option<String>) {
     let shell = std::env::var_os("SHELL")
         .filter(|shell| !shell.is_empty())
         .unwrap_or_else(|| "/bin/sh".into());
-    let name = Path::new(&shell)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let mut command = Command::new(&shell);
-    command.args(login_shell_flags(&name));
-    command.arg(format!("echo {marker}; /usr/bin/env -0; echo {marker}"));
-    command
+    login_shell_invocation(Path::new(&shell), marker)
 }
 
-/// csh and tcsh accept `-l` only as their sole flag.
+/// The environment is printed NUL-delimited where `env -0` exists, and
+/// newline-delimited otherwise (older BSD `env`).
+///
+/// csh and tcsh accept `-l` only as their sole flag, so they get the script
+/// on stdin instead of through `-c`; that still reads `.cshrc` and `.login`.
 #[cfg(unix)]
-fn login_shell_flags(shell_name: &str) -> &'static [&'static str] {
-    match shell_name {
-        "csh" | "tcsh" => &["-i", "-c"],
-        _ => &["-i", "-l", "-c"],
+fn login_shell_invocation(shell: &Path, marker: &str) -> (Command, Option<String>) {
+    let script = format!("echo {marker}; /usr/bin/env -0 || /usr/bin/env; echo {marker}");
+    let mut command = Command::new(shell);
+    match shell.file_name().and_then(|name| name.to_str()) {
+        Some("csh" | "tcsh") => {
+            command.arg("-l");
+            (command, Some(format!("{script}\n")))
+        }
+        _ => {
+            command.args(["-i", "-l", "-c"]).arg(script);
+            (command, None)
+        }
     }
 }
 
 /// PowerShell with the user's profile, printing its environment
 /// NUL-delimited between two `marker` strings.
 #[cfg(windows)]
-fn login_shell_command(marker: &str) -> Command {
+fn login_shell_command(marker: &str) -> (Command, Option<String>) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -377,18 +398,24 @@ fn login_shell_command(marker: &str) -> Command {
          [Console]::Out.Write('{marker}')"
     ));
     command.creation_flags(CREATE_NO_WINDOW);
-    command
+    (command, None)
 }
 
-/// Run `command` and parse the environment it prints between two `marker`
-/// strings, killing it if that takes longer than `timeout`.
+/// Run `command`, feeding it `stdin_script` if given, and parse the
+/// environment it prints between two `marker` strings, killing it if that
+/// takes longer than `timeout`.
 fn capture_shell_env(
     mut command: Command,
+    stdin_script: Option<String>,
     marker: &str,
     timeout: Duration,
 ) -> Result<Vec<(String, String)>, String> {
     command
-        .stdin(Stdio::null())
+        .stdin(if stdin_script.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     #[cfg(unix)]
@@ -409,6 +436,11 @@ fn capture_shell_env(
     let mut child = command
         .spawn()
         .map_err(|error| format!("could not start the login shell: {error}"))?;
+    if let (Some(script), Some(mut stdin)) = (stdin_script, child.stdin.take()) {
+        // The script fits in the pipe buffer, so this cannot block; a shell
+        // that exits early surfaces below as missing output.
+        let _ = std::io::Write::write_all(&mut stdin, script.as_bytes());
+    }
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let end_marker = marker.as_bytes().to_vec();
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -487,8 +519,10 @@ fn occurrences(haystack: &[u8], needle: &[u8]) -> usize {
         .count()
 }
 
-/// Extract `KEY=VALUE` pairs from the NUL-delimited block between the first
-/// two `marker`s, ignoring anything the profile printed around it.
+/// Extract `KEY=VALUE` pairs from the block between the first two `marker`s,
+/// ignoring anything the profile printed around it. The block is
+/// NUL-delimited, or newline-delimited when `env -0` was unavailable (then a
+/// multi-line value is cut at its first line break).
 fn parse_shell_env_output(output: &[u8], marker: &str) -> Result<Vec<(String, String)>, String> {
     let marker = marker.as_bytes();
     let start =
@@ -497,20 +531,35 @@ fn parse_shell_env_output(output: &[u8], marker: &str) -> Result<Vec<(String, St
     let end =
         find_bytes(rest, marker).ok_or("the login shell environment output was incomplete")?;
     let block = &rest[..end];
-    if !block.contains(&0) {
-        return Err("the login shell environment output was not NUL-delimited".to_owned());
-    }
+    let delimiter = if block.contains(&0) { 0 } else { b'\n' };
     let leading_newlines = block
         .iter()
         .take_while(|byte| matches!(byte, b'\r' | b'\n'))
         .count();
-    Ok(block[leading_newlines..]
-        .split(|byte| *byte == 0)
+    let vars: Vec<(String, String)> = block[leading_newlines..]
+        .split(|byte| *byte == delimiter)
         .filter_map(|entry| {
             let (key, value) = std::str::from_utf8(entry).ok()?.split_once('=')?;
             (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
         })
-        .collect())
+        .collect();
+    if vars.is_empty() {
+        return Err("the login shell environment output was empty".to_owned());
+    }
+    Ok(vars)
+}
+
+fn is_proxy_var(key: &str) -> bool {
+    key.to_ascii_uppercase().ends_with("_PROXY")
+}
+
+/// Whether a proxy URL embeds `user[:password]@` before its host.
+fn proxy_has_credentials(value: &str) -> bool {
+    let authority = value.split_once("://").map_or(value, |(_, rest)| rest);
+    authority
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|authority| authority.contains('@'))
 }
 
 fn env_key_eq(a: &str, b: &str) -> bool {
@@ -522,8 +571,8 @@ fn env_key_eq(a: &str, b: &str) -> bool {
 }
 
 /// The variables to set so the process gains what `shell` adds to
-/// `inherited`: missing [`IMPORTED_SHELL_VARS`] are added, existing ones are
-/// kept, and `PATH` becomes the de-duplicated union with `shell` entries
+/// `inherited`: missing [`IMPORTED_SHELL_VARS`] are added (except proxy URLs
+/// with embedded credentials), existing ones are kept, and `PATH` becomes the de-duplicated union with `shell` entries
 /// first when `shell_path_first` is true. Everything else is ignored.
 fn merge_shell_env(
     inherited: &[(String, String)],
@@ -542,6 +591,7 @@ fn merge_shell_env(
                 .iter()
                 .any(|allowed| env_key_eq(key, allowed))
         })
+        .filter(|(key, value)| !(is_proxy_var(key) && proxy_has_credentials(value)))
         .filter(|(key, _)| lookup(inherited, key).is_none())
         .cloned()
         .collect();
@@ -930,7 +980,35 @@ mod tests {
     fn parse_shell_env_output_rejects_missing_or_malformed_blocks() {
         assert!(parse_shell_env_output(b"no markers", "MARK").is_err());
         assert!(parse_shell_env_output(b"MARK\nA=1\0", "MARK").is_err());
-        assert!(parse_shell_env_output(b"MARK\nA=1\nB=2\nMARK\n", "MARK").is_err());
+        assert!(parse_shell_env_output(b"MARK\nusage: env\nMARK\n", "MARK").is_err());
+    }
+
+    #[test]
+    fn parse_shell_env_output_accepts_newline_delimited_fallback() {
+        let output = b"MARK\nA=1\nNODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem\nMARK\n";
+        let parsed = parse_shell_env_output(output, "MARK").unwrap();
+        assert_eq!(
+            parsed,
+            vars(&[("A", "1"), ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem")])
+        );
+    }
+
+    #[test]
+    fn merge_skips_proxy_urls_with_credentials() {
+        let shell = vars(&[
+            ("HTTPS_PROXY", "http://user:password@proxy:8080"),
+            ("http_proxy", "user@proxy:3128"),
+            ("ALL_PROXY", "socks5://proxy:1080/path@x"),
+            ("NO_PROXY", "localhost,.internal"),
+        ]);
+        let updates = merge_shell_env(&[], &shell, true);
+        assert_eq!(
+            updates,
+            vars(&[
+                ("ALL_PROXY", "socks5://proxy:1080/path@x"),
+                ("NO_PROXY", "localhost,.internal"),
+            ])
+        );
     }
 
     #[test]
@@ -1002,10 +1080,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn login_shell_flags_avoid_combined_login_flag_for_csh() {
-        assert_eq!(login_shell_flags("zsh"), &["-i", "-l", "-c"]);
-        assert_eq!(login_shell_flags("fish"), &["-i", "-l", "-c"]);
-        assert_eq!(login_shell_flags("tcsh"), &["-i", "-c"]);
+    fn login_shell_invocation_passes_csh_script_on_stdin() {
+        let args = |shell: &str| {
+            let (command, stdin) = login_shell_invocation(Path::new(shell), "MARK");
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            (args, stdin)
+        };
+        let (zsh_args, zsh_stdin) = args("/bin/zsh");
+        assert_eq!(&zsh_args[..3], ["-i", "-l", "-c"]);
+        assert!(zsh_args[3].contains("env -0"));
+        assert!(zsh_stdin.is_none());
+        let (tcsh_args, tcsh_stdin) = args("/bin/tcsh");
+        assert_eq!(tcsh_args, ["-l"]);
+        assert!(tcsh_stdin.unwrap().contains("env -0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_feeds_the_stdin_script() {
+        let parsed = capture_shell_env(
+            Command::new("/bin/sh"),
+            Some("echo MARK; printf 'A=1\\000'; echo MARK\n".to_owned()),
+            "MARK",
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(parsed, vars(&[("A", "1")]));
     }
 
     #[cfg(unix)]
@@ -1020,7 +1123,8 @@ mod tests {
     fn capture_reads_environment_printed_between_markers() {
         let script = "echo 'profile banner'; echo MARK; \
                       printf 'A=1\\000NODE_EXTRA_CA_CERTS=/etc/ssl/cert.pem\\000'; echo MARK";
-        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(5)).unwrap();
+        let parsed =
+            capture_shell_env(fake_shell(script), None, "MARK", Duration::from_secs(5)).unwrap();
         assert_eq!(
             parsed,
             vars(&[("A", "1"), ("NODE_EXTRA_CA_CERTS", "/etc/ssl/cert.pem")])
@@ -1032,7 +1136,8 @@ mod tests {
     fn capture_does_not_wait_for_background_jobs_holding_stdout() {
         let script = "sleep 5 & echo MARK; printf 'A=1\\000'; echo MARK; wait";
         let started = std::time::Instant::now();
-        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(4)).unwrap();
+        let parsed =
+            capture_shell_env(fake_shell(script), None, "MARK", Duration::from_secs(4)).unwrap();
         assert_eq!(parsed, vars(&[("A", "1")]));
         assert!(started.elapsed() < Duration::from_secs(3));
     }
@@ -1042,7 +1147,8 @@ mod tests {
     fn capture_detaches_the_shell_from_the_terminal() {
         // Under a terminal, reading /dev/tty from a background group would stop the shell.
         let script = "cat /dev/tty >/dev/null 2>&1; echo MARK; printf 'A=1\\000'; echo MARK";
-        let parsed = capture_shell_env(fake_shell(script), "MARK", Duration::from_secs(3)).unwrap();
+        let parsed =
+            capture_shell_env(fake_shell(script), None, "MARK", Duration::from_secs(3)).unwrap();
         assert_eq!(parsed, vars(&[("A", "1")]));
     }
 
@@ -1050,8 +1156,13 @@ mod tests {
     #[test]
     fn capture_times_out_and_kills_a_hanging_shell() {
         let started = std::time::Instant::now();
-        let error = capture_shell_env(fake_shell("sleep 30"), "MARK", Duration::from_millis(300))
-            .unwrap_err();
+        let error = capture_shell_env(
+            fake_shell("sleep 30"),
+            None,
+            "MARK",
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
         assert!(error.contains("did not finish"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
@@ -1059,8 +1170,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn capture_reports_a_failing_shell() {
-        let error =
-            capture_shell_env(fake_shell("exit 3"), "MARK", Duration::from_secs(5)).unwrap_err();
+        let error = capture_shell_env(fake_shell("exit 3"), None, "MARK", Duration::from_secs(5))
+            .unwrap_err();
         assert!(error.contains("printed no environment"), "{error}");
     }
 }
