@@ -80,7 +80,7 @@ Only these variables are copied:
 | Locale | `LANG`, `LC_ALL`, `LC_CTYPE` |
 | Runtimes | `JAVA_HOME`, `GOPATH`, `GOROOT`, `CARGO_HOME`, `RUSTUP_HOME`, `DOTNET_ROOT`, `NVM_DIR`, `NVM_BIN`, `VOLTA_HOME`, `PNPM_HOME`, `BUN_INSTALL`, `PYENV_ROOT`, `ASDF_DIR`, `ASDF_DATA_DIR`, `MISE_DATA_DIR` |
 
-**Tokens, API keys, and other credentials in your profile are not copied.** When INXM Local is opened from the desktop, AI-generated steps and launched tools cannot read them. A proxy URL that embeds a username and password is copied with the proxy variable.
+**Tokens, API keys, and other credentials in your profile are not copied.** When INXM Local is opened from the desktop, AI-generated steps and launched tools cannot read them. A proxy variable whose URL embeds a username or password (for example `http://user:password@proxy:8080`) is not copied either; set it on the tools that need it.
 
 **Starting INXM Local from a terminal passes on all of that terminal's variables, including credentials.** Every program started from a terminal inherits its full environment. This is how the operating system works, not something INXM Local adds. If your shell exports `OPENAI_API_KEY`, `GITHUB_TOKEN`, or `AWS_SECRET_ACCESS_KEY`, a terminal-launched INXM Local has them. So does every process it starts, including MCP servers, subprocess tools, AI-generated steps, and agent CLIs.
 
