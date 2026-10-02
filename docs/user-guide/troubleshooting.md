@@ -6,7 +6,7 @@ Use these checks to diagnose common setup and workflow issues.
 
 ## The compiler is not configured
 
-Open **Settings -> Compiler** and choose a backend. For automatic API-key selection, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` before starting the app for more details. Account-backed connections require the corresponding `codex` or `claude` CLI to be installed and signed in.
+Open **Settings -> Compiler** and choose a backend. For automatic API-key selection, set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` before starting the app. Account-backed connections require the corresponding `codex` or `claude` CLI to be installed and signed in.
 
 ## The MCP server cannot bind its port
 
