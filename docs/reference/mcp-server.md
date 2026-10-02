@@ -75,7 +75,7 @@ INXM_MCP_ONLY=1 inxm-local
 ```
 
 !!! note
-    Started from a terminal, INXM Local inherits that terminal's full environment, including credentials, and passes it to every tool and AI-generated step it runs. See [Tool environment](configuration.md#tool-environment) for more details.
+    Started from a terminal, INXM Local inherits that terminal's full environment, including credentials, and passes it to every local program it starts: subprocess tools, Local stdio MCP servers, and AI-generated steps. HTTP tools and Remote HTTP MCP servers do not receive it. See [Tool environment](configuration.md#tool-environment) for more details.
 
 For a repository self-test, run:
 

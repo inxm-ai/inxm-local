@@ -82,7 +82,7 @@ Only these variables are copied:
 
 **Tokens, API keys, and other credentials in your profile are not copied.** When INXM Local is opened from the desktop, AI-generated steps and launched tools cannot read them. A proxy variable whose URL embeds a username or password (for example `http://user:password@proxy:8080`) is not copied either; set it on the tools that need it.
 
-**Starting INXM Local from a terminal passes on all of that terminal's variables, including credentials.** Every program started from a terminal inherits its full environment. This is how the operating system works, not something INXM Local adds. If your shell exports `OPENAI_API_KEY`, `GITHUB_TOKEN`, or `AWS_SECRET_ACCESS_KEY`, a terminal-launched INXM Local has them. So does every process it starts, including MCP servers, subprocess tools, AI-generated steps, and agent CLIs.
+**Starting INXM Local from a terminal passes on all of that terminal's variables, including credentials.** Every program started from a terminal inherits its full environment. This is how the operating system works, not something INXM Local adds. If your shell exports `OPENAI_API_KEY`, `GITHUB_TOKEN`, or `AWS_SECRET_ACCESS_KEY`, a terminal-launched INXM Local has them. So does every process it starts, including INXM Local stdio MCP servers, subprocess tools, AI-generated steps, and agent CLIs.
 
 Choose the launch method that matches what your tools should see:
 
