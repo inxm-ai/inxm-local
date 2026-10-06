@@ -46,6 +46,6 @@ Use the catalog view to inspect its schema, then run a small plan that calls the
 
 <h2>What's next</h2>
 
-- [Follow the guide to set up MCP servers](mcp-server-examples.md) to connect INXM Local to external services.
+- [Browse MCP server setup examples](../tutorials/mcp-server-examples.md) to connect INXM Local to external services.
 - [Call the Local MCP server](../reference/mcp-server.md) from another trusted local client.
 - [Connect Hermes to INXM Local](hermes.md) when you want to combine both workflows.
