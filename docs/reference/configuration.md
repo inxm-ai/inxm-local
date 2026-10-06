@@ -26,6 +26,8 @@ The Settings view persists these `settings.json` fields:
 | `keep_running_in_background` | Controls close-to-tray behavior |
 | `schedules_paused` | Pauses all schedules without changing their individual enabled state |
 | `telemetry_enabled` | Explicit telemetry consent; only `true` enables collection |
+| `claude_usage_enabled` | Records and displays usage for Anthropic Claude API calls |
+| `claude_prompts_enabled` | Stores request and response bodies for Anthropic Claude API calls |
 
 Other fields control theme, update checks, onboarding state, and Codex sandbox behavior. Prefer the Settings UI so defaults and compatibility behavior remain intact.
 
@@ -47,6 +49,8 @@ Other fields control theme, update checks, onboarding state, and Codex sandbox b
 | `INXM_TELEMETRY_ENDPOINT` | Override the telemetry event endpoint |
 | `ANTHROPIC_API_KEY` | API-key fallback for Claude when the backend is automatic or API-backed |
 | `OPENAI_API_KEY` | API-key fallback for OpenAI when the backend is automatic or API-backed |
+| `INXM_CLAUDE_USAGE=off` | Disable local Anthropic Claude API usage recording and new token summaries for this process; `0`, `false`, and `no` also disable it |
+| `INXM_STORE_CLAUDE_PROMPTS=1` | Turn on direct Anthropic Claude API message storage for this process. See [Claude API token usage](claude-usage.md). |
 
 ## Tool environment
 
