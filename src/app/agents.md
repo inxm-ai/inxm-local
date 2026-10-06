@@ -10,6 +10,7 @@ Files:
 - `engine.rs` — async bridge to compiler/executor
 - `chat_store.rs`, `schedule_store.rs` — chat/schedule persistence
 - `mcp_server.rs` — local MCP server
+- `usage.rs` — Claude API token usage trackers
 - `commands.rs` — slash commands
 - `mod.rs` — shell: nav, event routing, layout
 
