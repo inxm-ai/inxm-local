@@ -68,6 +68,62 @@ pub enum RunsAction {
     Delete { run_id: String },
 }
 
+fn next_delete_confirmation(
+    pending_run_id: Option<&str>,
+    action: Option<&RunsAction>,
+) -> Option<String> {
+    match action {
+        Some(RunsAction::AskDelete { run_id }) => Some(run_id.clone()),
+        Some(RunsAction::Delete { run_id }) if pending_run_id == Some(run_id.as_str()) => None,
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod delete_confirmation_tests {
+    use super::*;
+
+    #[test]
+    fn other_action_clears_pending_delete_confirmation() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::Inspect {
+                    plan_id: "plan-a".to_owned(),
+                    run_id: "run-b".to_owned(),
+                }),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn asking_to_delete_another_run_arms_only_that_run() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::AskDelete {
+                    run_id: "run-b".to_owned(),
+                }),
+            ),
+            Some("run-b".to_owned())
+        );
+    }
+
+    #[test]
+    fn confirming_the_pending_run_clears_confirmation() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::Delete {
+                    run_id: "run-a".to_owned(),
+                }),
+            ),
+            None
+        );
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusFilter {
     #[default]
@@ -97,6 +153,7 @@ pub fn show(
     agent_mode: bool,
 ) -> Option<RunsAction> {
     let mut action = None;
+    let pending_delete = state.confirm_delete.clone();
     let running_count = count_running(runs);
 
     widgets::scroll_area_vertical()
@@ -151,23 +208,12 @@ pub fn show(
                 let now = chrono::Utc::now();
                 for run in &visible {
                     if let Some(row_action) = run_row(ui, run, now, agent_mode, state) {
-                        match &row_action {
-                            RunsAction::Abort { run_id } => {
-                                state.abort_failed.remove(run_id);
-                                state.aborting.insert(run_id.clone());
-                            }
-                            RunsAction::AskDelete { run_id } => {
-                                state.confirm_delete = Some(run_id.clone());
-                            }
-                            RunsAction::Delete { .. } => state.confirm_delete = None,
-                            _ => {}
+                        if let RunsAction::Abort { run_id } = &row_action {
+                            state.abort_failed.remove(run_id);
+                            state.aborting.insert(run_id.clone());
                         }
                         action = Some(row_action);
                     }
-                }
-                // A click anywhere else cancels a pending confirmation.
-                if action.is_none() && ui.input(|input| input.pointer.any_click()) {
-                    state.confirm_delete = None;
                 }
             }
 
@@ -186,6 +232,10 @@ pub fn show(
             );
             ui.add_space(12.0);
         });
+
+    if ui.input(|input| input.pointer.any_click()) {
+        state.confirm_delete = next_delete_confirmation(pending_delete.as_deref(), action.as_ref());
+    }
 
     action
 }
