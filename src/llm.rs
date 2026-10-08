@@ -378,7 +378,7 @@ fn store_prompts_flag(value: Option<&str>) -> bool {
 }
 
 /// Only calls to the real Anthropic API are recorded.
-fn is_anthropic_api(base_url: &str) -> bool {
+pub(crate) fn is_anthropic_api(base_url: &str) -> bool {
     reqwest::Url::parse(base_url.trim()).is_ok_and(|url| {
         url.host_str()
             .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
