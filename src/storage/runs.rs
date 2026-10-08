@@ -318,6 +318,20 @@ impl RunStore {
         Ok(run)
     }
 
+    /// Delete a stored run record.
+    pub fn delete(&self, run_id: &str) -> Result<(), StorageError> {
+        super::validate_record_id(run_id)?;
+        let path = self.dir.join(run_file_name(run_id));
+        if !path.exists() {
+            return Err(StorageError::NotFound {
+                kind: NOT_FOUND_KIND,
+                id: run_id.to_owned(),
+            });
+        }
+        std::fs::remove_file(path)?;
+        Ok(())
+    }
+
     /// List all runs, most recent first.
     pub fn list(&self) -> Result<Vec<RunSummary>, StorageError> {
         let mut summaries = Vec::new();
@@ -547,6 +561,25 @@ mod tests {
 
         let loaded = store.load(&run.id).unwrap();
         assert_eq!(loaded, run);
+    }
+
+    #[test]
+    fn delete_removes_the_record_and_reports_unknown_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let run = Run::new("plan-1", 1);
+        store.save(&run).unwrap();
+
+        store.delete(&run.id).unwrap();
+
+        assert!(matches!(
+            store.load(&run.id),
+            Err(StorageError::NotFound { kind: "run", .. })
+        ));
+        assert!(matches!(
+            store.delete(&run.id),
+            Err(StorageError::NotFound { kind: "run", .. })
+        ));
     }
 
     #[test]

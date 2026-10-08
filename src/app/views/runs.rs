@@ -21,9 +21,11 @@ const COL_RUN_ID: f32 = 78.0;
 const COL_SOURCE: f32 = 82.0;
 const COL_STARTED: f32 = 104.0;
 const COL_DURATION: f32 = 170.0;
+/// Trailing delete cell; wide enough for the "Delete?" confirmation.
+const COL_DELETE: f32 = 52.0;
 /// Space the flexible PLAN cell must leave for everything to its right
-/// (source, started, duration, Inspect button, spacings).
-const PLAN_RESERVED: f32 = COL_SOURCE + COL_STARTED + COL_DURATION + 130.0;
+/// (source, started, duration, Inspect button, delete cell, spacings).
+const PLAN_RESERVED: f32 = COL_SOURCE + COL_STARTED + COL_DURATION + COL_DELETE + 130.0;
 /// Failed rows show a short error summary in the duration column; the full
 /// message stays reachable on hover.
 const ERROR_SUMMARY_MAX_CHARS: usize = 24;
@@ -44,6 +46,8 @@ pub struct RunsState {
     pub aborting: std::collections::HashSet<String>,
     /// Running rows that could not be matched to a live execution in this process.
     pub abort_failed: std::collections::HashSet<String>,
+    /// Run whose ✕ was clicked once and awaits a second click.
+    pub confirm_delete: Option<String>,
 }
 
 /// Actions the shell must react to (navigation / engine commands).
@@ -143,12 +147,23 @@ pub fn show(
                 let now = chrono::Utc::now();
                 for run in &visible {
                     if let Some(row_action) = run_row(ui, run, now, agent_mode, state) {
-                        if let RunsAction::Abort { run_id } = &row_action {
-                            state.abort_failed.remove(run_id);
-                            state.aborting.insert(run_id.clone());
+                        match &row_action {
+                            RunsAction::Abort { run_id } => {
+                                state.abort_failed.remove(run_id);
+                                state.aborting.insert(run_id.clone());
+                            }
+                            RunsAction::AskDelete { run_id } => {
+                                state.confirm_delete = Some(run_id.clone());
+                            }
+                            RunsAction::Delete { .. } => state.confirm_delete = None,
+                            _ => {}
                         }
                         action = Some(row_action);
                     }
+                }
+                // A click anywhere else cancels a pending confirmation.
+                if action.is_none() && ui.input(|input| input.pointer.any_click()) {
+                    state.confirm_delete = None;
                 }
             }
 
@@ -255,7 +270,7 @@ fn header_row(ui: &mut Ui) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // Blank space over the Inspect column keeps DURATION centered
             // over its cells.
-            ui.add_space(76.0);
+            ui.add_space(76.0 + COL_DELETE);
             ui.scope(|ui| {
                 ui.set_width(COL_DURATION);
                 caption(ui, "DURATION");
@@ -337,6 +352,36 @@ fn run_row(
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(COL_DELETE, ui.spacing().interact_size.y),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        if running {
+                            return;
+                        }
+                        let confirming = state.confirm_delete.as_deref() == Some(run.id.as_str());
+                        let (glyph, color) = match confirming {
+                            true => ("Delete?", theme::err()),
+                            false => ("✕", theme::text_faint()),
+                        };
+                        let delete = ui.add(
+                            egui::Label::new(
+                                RichText::new(glyph).size(theme::FONT_SMALL).color(color),
+                            )
+                            .sense(Sense::click()),
+                        );
+                        if delete.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if delete.clicked() {
+                            let run_id = run.id.clone();
+                            action = Some(match confirming {
+                                true => RunsAction::Delete { run_id },
+                                false => RunsAction::AskDelete { run_id },
+                            });
+                        }
+                    },
+                );
                 if widgets::ghost_button(ui, "Inspect").clicked() {
                     action = Some(match agent_mode {
                         true => RunsAction::InspectReadOnly {

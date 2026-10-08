@@ -867,6 +867,10 @@ pub enum EngineCommand {
     AbortRun {
         run_id: String,
     },
+    /// Remove a finished run's stored record. Refuses runs still executing.
+    DeleteRun {
+        run_id: String,
+    },
     ListTools,
     ListPatches,
     /// Insert or update a catalog entry and persist the catalog.
@@ -1036,6 +1040,7 @@ impl EngineCommandTrace {
             EngineCommand::ResumeRun { .. } => "resume_run",
             EngineCommand::RejectPatch { .. } => "reject_patch",
             EngineCommand::AbortRun { .. } => "abort_run",
+            EngineCommand::DeleteRun { .. } => "delete_run",
             EngineCommand::ListTools => "list_tools",
             EngineCommand::ListPatches => "list_patches",
             EngineCommand::SaveTool { .. } => "save_tool",
@@ -1070,6 +1075,7 @@ impl EngineCommandTrace {
             | EngineCommand::InspectRunReadOnly { run_id }
             | EngineCommand::Repair { run_id }
             | EngineCommand::AbortRun { run_id }
+            | EngineCommand::DeleteRun { run_id }
             | EngineCommand::ResumeRun { run_id, .. } => Some(run_id.clone()),
             _ => None,
         };
@@ -1988,6 +1994,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
             }
             Ok(())
         }
+        EngineCommand::DeleteRun { run_id } => delete_run(env, &run_id).await,
         EngineCommand::ListTools => {
             announce_catalog(env);
             Ok(())
@@ -4018,6 +4025,29 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
     }
 
     Ok(AbortOutcome::Unavailable)
+}
+
+/// Delete a finished run's record. Token-usage ledger entries stay: they are
+/// spend history, not run state.
+async fn delete_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<()> {
+    if env.run_cancellations.lock().await.contains_key(run_id) {
+        anyhow::bail!("Run {run_id} is still running. Abort it before deleting.");
+    }
+    env.paths
+        .mutations
+        .run_named("run.delete", env.triggered_by(), || {
+            let storage = env.storage()?;
+            if matches!(
+                storage.runs().load(run_id)?.status,
+                executor::RunStatus::Running
+            ) {
+                anyhow::bail!("Run {run_id} is still running. Abort it before deleting.");
+            }
+            storage.runs().delete(run_id)?;
+            Ok(())
+        })?;
+    env.emit(EngineEvent::RunList(list_runs(env)?));
+    Ok(())
 }
 
 fn mark_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
