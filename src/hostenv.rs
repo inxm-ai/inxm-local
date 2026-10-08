@@ -1036,21 +1036,21 @@ mod tests {
         );
     }
 
-    /// A plain empty file (no shebang, not executable on macOS/Linux) should
-    /// fail to spawn — it is on disk but cannot be exec'd by the kernel.
+    /// A script whose shebang interpreter is missing is on disk but cannot
+    /// start: the kernel reports `ENOENT`. (A file the kernel rejects with
+    /// `ENOEXEC`, such as an empty one, is not a usable fixture: macOS
+    /// `posix_spawnp` retries those through `/bin/sh` and succeeds.)
     #[cfg(unix)]
     #[test]
-    fn interpreter_actually_spawns_returns_false_for_empty_file() {
+    fn interpreter_actually_spawns_returns_false_for_missing_shebang_interpreter() {
         let tmp = tempfile::tempdir().unwrap();
-        let path = tmp.path().join("empty_interpreter");
-        std::fs::write(&path, "").unwrap();
-        // Set execute bit so the kernel tries to exec it.
+        let path = tmp.path().join("broken_interpreter");
+        std::fs::write(&path, "#!/nonexistent/inxm-test-interpreter\n").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // The kernel rejects an empty executable with ENOEXEC.
         assert!(
             !interpreter_actually_spawns(&path),
-            "an empty file must not be reported as spawnable"
+            "a script with a missing shebang interpreter must not be reported as spawnable"
         );
     }
 
