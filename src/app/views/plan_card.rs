@@ -8,6 +8,7 @@ use egui::{Align, Color32, Id, Key, Layout, Order, Pos2, RichText, Stroke, Ui};
 
 use crate::executor::{FanOutProgress, RunStatus, StepRunIteration, StepRunStatus};
 use crate::plan::types::{InputKind, Plan, PlanInput, PlanStep, StepConfig, StepType};
+use crate::storage::llm_usage::TokenTotals;
 
 use crate::app::engine::RunListItem;
 use crate::app::{anim, theme, time, widgets};
@@ -39,6 +40,12 @@ pub struct RunBinding {
     /// Per-item executions for templates owned by a FAN_OUT step.
     #[serde(default)]
     pub iterations: HashMap<String, Vec<StepRunIteration>>,
+    /// Recorded Claude API calls per step, across attempts and iterations.
+    #[serde(default)]
+    pub claude_calls: HashMap<String, Vec<crate::storage::llm_usage::ClaudeCallSummary>>,
+    /// Aggregate token count reported by non-Claude providers.
+    #[serde(default)]
+    pub token_usage_total: Option<u64>,
     /// Current live position of each running FAN_OUT step.
     #[serde(skip)]
     pub fan_out_progress: HashMap<String, FanOutProgress>,
@@ -91,6 +98,7 @@ pub fn show(
     card_id: Id,
     plan: &Plan,
     run: Option<&RunBinding>,
+    show_claude_usage: bool,
 ) -> Option<PlanCardAction> {
     let mut action = None;
 
@@ -121,7 +129,7 @@ pub fn show(
             ui.add_space(4.0);
         }
 
-        steps_graph(ui, card_id, plan, run);
+        steps_graph(ui, card_id, plan, run, show_claude_usage);
 
         ui.add_space(6.0);
         ui.separator();
@@ -141,6 +149,7 @@ pub fn show_workspace(
     plan: &Plan,
     run: Option<&RunBinding>,
     runs: &[RunListItem],
+    show_claude_usage: bool,
 ) -> Option<WorkspaceAction> {
     let mut action = None;
     // Stores the id of the run the full-screen takeover was opened for (see
@@ -282,7 +291,14 @@ pub fn show_workspace(
     let expanded =
         run.is_some_and(|binding| expanded_for_run.as_deref() == Some(binding.run_id.as_str()));
     if expanded {
-        show_expanded_workspace(ui, card_id.with("expanded"), expanded_id, plan, run);
+        show_expanded_workspace(
+            ui,
+            card_id.with("expanded"),
+            expanded_id,
+            plan,
+            run,
+            show_claude_usage,
+        );
     }
     action
 }
@@ -295,6 +311,7 @@ fn show_expanded_workspace(
     expanded_id: Id,
     plan: &Plan,
     run: Option<&RunBinding>,
+    show_claude_usage: bool,
 ) {
     let ctx = ui.ctx().clone();
     let screen = ctx.screen_rect();
@@ -356,8 +373,64 @@ fn show_expanded_workspace(
                             }
                             ui.add_space(6.0);
                             ui.separator();
-                            steps_graph(ui, card_id.with("graph"), plan, run);
+                            steps_graph(ui, card_id.with("graph"), plan, run, show_claude_usage);
                             ui.add_space(12.0);
+                            if show_claude_usage && let Some(binding) = run {
+                                let has_recorded_usage = binding.token_usage_total.is_some()
+                                    || binding
+                                        .claude_calls
+                                        .values()
+                                        .any(|calls| !calls.is_empty());
+                                let has_ai_step = plan.steps.iter().any(|step| {
+                                    matches!(
+                                        step.step_type(),
+                                        StepType::PromptCall | StepType::AgentCall
+                                    )
+                                });
+                                let claude_totals = TokenTotals::from_summaries(
+                                    binding.claude_calls.values().flatten(),
+                                );
+                                let tokens_spent = if claude_totals.calls > 0 {
+                                    claude_totals.total
+                                } else {
+                                    binding.token_usage_total.unwrap_or(0)
+                                };
+                                ui.separator();
+                                if tokens_spent == 0 && claude_totals.unknown_calls == 0 {
+                                    let (message, hint) = if !has_recorded_usage && has_ai_step {
+                                        (
+                                            "No Claude token usage was reported for this run.",
+                                            "This plan includes an AI-backed step, but no provider usage was recorded, so zero spend cannot be confirmed.",
+                                        )
+                                    } else if has_recorded_usage {
+                                        (
+                                            "No Claude tokens were spent on this run.",
+                                            "The provider reported no billable token usage for this run.",
+                                        )
+                                    } else {
+                                        (
+                                            "Zero tokens spent in this run. The plan ran from its compiled steps, without model calls.",
+                                            "Plan creation and editing usage are counted separately from run usage.",
+                                        )
+                                    };
+                                    ui.label(
+                                        RichText::new(message)
+                                            .size(theme::FONT_SMALL)
+                                            .color(theme::text_muted()),
+                                    )
+                                    .on_hover_text(hint);
+                                } else {
+                                    let token_usage = crate::app::usage::run_tokens_label(
+                                        binding.claude_calls.values().flatten(),
+                                        binding.token_usage_total,
+                                    );
+                                    ui.label(
+                                        RichText::new(token_usage)
+                                            .size(theme::FONT_SMALL)
+                                            .color(theme::text_muted()),
+                                    );
+                                }
+                            }
                         });
                 });
         });
@@ -409,7 +482,13 @@ fn run_status_chip(ui: &mut Ui, binding: &RunBinding) {
     }
 }
 
-fn steps_graph(ui: &mut Ui, card_id: Id, plan: &Plan, run: Option<&RunBinding>) {
+fn steps_graph(
+    ui: &mut Ui,
+    card_id: Id,
+    plan: &Plan,
+    run: Option<&RunBinding>,
+    show_claude_usage: bool,
+) {
     let owners = fan_out_owner_of(plan);
     let depths = topo_depths(plan, &owners);
     let order = display_order(plan, &owners);
@@ -494,6 +573,19 @@ fn steps_graph(ui: &mut Ui, card_id: Id, plan: &Plan, run: Option<&RunBinding>) 
                                 .color(theme::text_faint()),
                         );
                     }
+                    if let Some(tokens) = show_claude_usage
+                        .then_some(run)
+                        .flatten()
+                        .and_then(|r| r.claude_calls.get(&step.id))
+                        .and_then(|calls| crate::app::usage::step_tokens_label(calls))
+                    {
+                        ui.label(
+                            RichText::new(tokens)
+                                .size(theme::FONT_SMALL)
+                                .color(theme::text_faint()),
+                        )
+                        .on_hover_text("Claude API tokens reported for this step, all attempts");
+                    }
                 });
             });
 
@@ -508,7 +600,7 @@ fn steps_graph(ui: &mut Ui, card_id: Id, plan: &Plan, run: Option<&RunBinding>) 
             }
 
             if detail_open {
-                step_detail(ui, row_id, depth, plan, step, run);
+                step_detail(ui, row_id, depth, plan, step, run, show_claude_usage);
             }
 
             if let Some(error) = run.and_then(|r| r.errors.get(&step.id)) {
@@ -1291,6 +1383,7 @@ fn step_detail(
     plan: &Plan,
     step: &PlanStep,
     run: Option<&RunBinding>,
+    show_claude_usage: bool,
 ) {
     ui.horizontal_top(|ui| {
         ui.add_space(depth as f32 * INDENT_PER_LEVEL + RESULT_INDENT);
@@ -1382,6 +1475,18 @@ fn step_detail(
                                 row_id.with("iterations"),
                                 "Fan-out iterations",
                                 &pretty(&value),
+                            );
+                        }
+                        if let Some(calls) = show_claude_usage
+                            .then(|| binding.claude_calls.get(&step.id))
+                            .flatten()
+                            .filter(|calls| !calls.is_empty())
+                        {
+                            detail_block(
+                                ui,
+                                row_id.with("claude_calls"),
+                                "Claude calls",
+                                &crate::app::usage::step_calls_text(calls),
                             );
                         }
                         if let Some(error) = binding.errors.get(&step.id) {
