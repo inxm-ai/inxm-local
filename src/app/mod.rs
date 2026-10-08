@@ -30,6 +30,7 @@ mod tray;
 mod update_controller;
 pub mod update_gate;
 pub mod updater;
+mod usage;
 pub mod views;
 pub mod widgets;
 
@@ -94,7 +95,11 @@ pub fn run_headless(paths: DataPaths, settings: engine::AppSettings) -> Headless
         mcp_server::spawn_with_activities(paths.clone(), settings.mcp_port, activities);
     let (scheduler, events) = engine::start_scheduler_headless(paths.clone());
     if let Some(events) = events {
-        spawn_headless_chat_writer(paths, events);
+        spawn_headless_chat_writer(
+            paths,
+            events,
+            crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        );
     }
     HeadlessHandles {
         mcp_status,
@@ -1268,7 +1273,10 @@ impl InxmApp {
                     )),
                 ));
             }
-            EngineEvent::PlanCompiled { plan } => {
+            EngineEvent::PlanCompiled {
+                plan,
+                creation_usage,
+            } => {
                 self.chat.busy = None;
                 // The guided flow ends once the artifact exists; the design
                 // lives on in plan.metadata.solution_design.
@@ -1278,7 +1286,15 @@ impl InxmApp {
                     plan.name,
                     plan.steps.len()
                 );
-                self.chat.push(Role::Assistant, MessageBody::Text(text));
+                self.chat.push(
+                    Role::Assistant,
+                    MessageBody::PlanCreated {
+                        text,
+                        token_usage: creation_usage
+                            .as_ref()
+                            .and_then(usage::creation_usage_label),
+                    },
+                );
                 self.chat.attach_plan(plan);
                 self.engine.send(EngineCommand::ListPlans);
             }
@@ -1362,7 +1378,10 @@ impl InxmApp {
                 self.runs_view.aborting.remove(&run.id);
                 self.runs_view.abort_failed.remove(&run.id);
                 self.chat.apply_finished_run(&run);
-                let summary = chat::run_summary_text(&run);
+                let summary = chat::run_summary_text_with_usage(
+                    &run,
+                    crate::llm::claude_usage_enabled(self.settings.draft.claude_usage_enabled),
+                );
                 let body = if run.status.is_failed() {
                     MessageBody::RunFailed {
                         run_id: run.id.clone(),
@@ -2470,7 +2489,13 @@ impl eframe::App for InxmApp {
                 runs: &self.plans.runs,
                 patches: &self.patches,
             };
-            let action = chat::show_side_panel(ctx, &mut self.chat, &sources, &chat_engine);
+            let action = chat::show_side_panel(
+                ctx,
+                &mut self.chat,
+                &sources,
+                &chat_engine,
+                crate::llm::claude_usage_enabled(self.settings.draft.claude_usage_enabled),
+            );
             self.handle_chat_action(action);
         }
 
@@ -2515,6 +2540,9 @@ impl eframe::App for InxmApp {
                                     &sources,
                                     &chat_engine,
                                     self.settings.draft.auto_mode,
+                                    crate::llm::claude_usage_enabled(
+                                        self.settings.draft.claude_usage_enabled,
+                                    ),
                                 );
                                 self.handle_chat_action(action);
                                 // Persist in the same frame the message is

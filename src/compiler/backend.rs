@@ -591,6 +591,7 @@ impl Backend {
         correction_count: u64,
     ) -> Result<String, CompilerError> {
         let operation_name = operation.as_str();
+        crate::llm::set_usage_phase(operation_name);
         let span = tracing::info_span!(
             "compiler.llm.complete",
             compiler.operation = operation_name,
@@ -618,6 +619,7 @@ impl Backend {
 
         match result {
             Ok(response) => {
+                let usage = response.usage.as_ref();
                 span.in_scope(|| {
                     tracing::info!(
                         compiler.operation = operation_name,
@@ -625,6 +627,11 @@ impl Backend {
                         compiler.latency_ms = latency_ms,
                         compiler.input_tokens = ?response.input_tokens,
                         compiler.output_tokens = ?response.output_tokens,
+                        compiler.cache_creation_input_tokens =
+                            ?usage.and_then(|usage| usage.cache_creation_input_tokens),
+                        compiler.cache_read_input_tokens =
+                            ?usage.and_then(|usage| usage.cache_read_input_tokens),
+                        compiler.thinking_tokens = ?usage.and_then(|usage| usage.thinking_tokens),
                         compiler.correction_count = correction_count,
                         "compiler LLM operation completed"
                     );
@@ -1192,6 +1199,7 @@ mod tests {
             text: text.into(),
             input_tokens: Some(12),
             output_tokens: Some(8),
+            usage: None,
         })
     }
 

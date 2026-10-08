@@ -74,6 +74,10 @@ pub enum Role {
 #[allow(clippy::large_enum_variant)]
 pub enum MessageBody {
     Text(String),
+    PlanCreated {
+        text: String,
+        token_usage: Option<String>,
+    },
     Error(String),
     /// A run has begun, with a direct route to its live details.
     RunStarted {
@@ -272,6 +276,10 @@ pub struct GuidedFlow {
     /// A CompileFromSpec call is in flight (transient, not persisted).
     #[serde(skip)]
     pub awaiting_compile: bool,
+    /// Ties every Claude call of this flow to the plan it produces. Chats
+    /// saved before this field existed get a fresh id on load.
+    #[serde(default = "crate::app::usage::new_creation_session_id")]
+    pub creation_session_id: String,
 }
 
 impl GuidedFlow {
@@ -288,6 +296,7 @@ impl GuidedFlow {
             assess_turns: 0,
             design_pending: false,
             awaiting_compile: false,
+            creation_session_id: crate::app::usage::new_creation_session_id(),
         }
     }
 
@@ -658,6 +667,7 @@ pub fn show_side_panel(
     state: &mut ChatState,
     sources: &SuggestionSources,
     engine: &EngineHandle,
+    show_claude_usage: bool,
 ) -> Option<ChatViewAction> {
     let mut chat_action = None;
     let reveal_run_details = std::mem::take(&mut state.reveal_run_details);
@@ -722,6 +732,7 @@ pub fn show_side_panel(
                         plan,
                         state.workspace_run.as_ref(),
                         &plan_runs,
+                        show_claude_usage,
                     )
                 })
             });
@@ -807,6 +818,7 @@ pub fn show(
     sources: &SuggestionSources,
     engine: &EngineHandle,
     auto_mode: bool,
+    show_claude_usage: bool,
 ) -> Option<ChatViewAction> {
     let mut chat_action = None;
 
@@ -853,7 +865,14 @@ pub fn show(
                                 || flow.awaiting_compile;
                             flow_progress(ui, flow, working);
                         }
-                        messages(ui, state, sources, engine, &mut chat_action);
+                        messages(
+                            ui,
+                            state,
+                            sources,
+                            engine,
+                            &mut chat_action,
+                            show_claude_usage,
+                        );
                         status_row(ui, state);
                         if state.plan.is_none()
                             && let Some(flow) = &state.flow
@@ -996,6 +1015,7 @@ fn messages(
     sources: &SuggestionSources,
     engine: &EngineHandle,
     chat_action: &mut Option<ChatViewAction>,
+    show_claude_usage: bool,
 ) {
     let mut deferred: Vec<EngineCommand> = Vec::new();
     let mut deferred_insight_commands: Vec<String> = Vec::new();
@@ -1033,7 +1053,15 @@ fn messages(
         let msg_id = Id::new("chat_msg").with(message.id);
         anim::entrance(ui, msg_id, 0.0, |ui| {
             match &mut message.body {
-                MessageBody::Text(text) => text_bubble(ui, message.role, text),
+                MessageBody::Text(text) => text_bubble(ui, message.role, text, None),
+                MessageBody::PlanCreated { text, token_usage } => text_bubble(
+                    ui,
+                    message.role,
+                    text,
+                    show_claude_usage
+                        .then_some(token_usage.as_deref())
+                        .flatten(),
+                ),
                 MessageBody::Error(text) => error_bubble(ui, text),
                 MessageBody::RunStarted {
                     run_id,
@@ -1065,7 +1093,9 @@ fn messages(
                     if owned_plan_id.as_deref() == Some(plan.metadata.id.as_str()) {
                         return;
                     }
-                    if let Some(action) = plan_card::show(ui, msg_id, plan, run.as_ref()) {
+                    if let Some(action) =
+                        plan_card::show(ui, msg_id, plan, run.as_ref(), show_claude_usage)
+                    {
                         match action {
                             PlanCardAction::Run { plan_id, inputs } => {
                                 deferred.push(EngineCommand::RunPlan {
@@ -1261,7 +1291,7 @@ fn agent_transcript_card(ui: &mut Ui, step_id: &str, lines: &[AgentTranscriptLin
     });
 }
 
-fn text_bubble(ui: &mut Ui, role: Role, text: &str) {
+fn text_bubble(ui: &mut Ui, role: Role, text: &str, token_usage: Option<&str>) {
     let (layout, fill, width_share) = match role {
         Role::User => (Layout::right_to_left(Align::TOP), theme::user_bubble(), 0.8),
         Role::Assistant => (Layout::left_to_right(Align::TOP), theme::surface(), 0.9),
@@ -1269,9 +1299,23 @@ fn text_bubble(ui: &mut Ui, role: Role, text: &str) {
     ui.with_layout(layout, |ui| {
         ui.set_max_width(ui.available_width() * width_share);
         theme::bubble_frame(fill).show(ui, |ui| {
-            widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
+                if let Some(token_usage) = token_usage {
+                    ui.add_space(4.0);
+                    token_usage_subline(ui, token_usage);
+                }
+            });
         });
     });
+}
+
+fn token_usage_subline(ui: &mut Ui, token_usage: &str) {
+    ui.label(
+        RichText::new(token_usage)
+            .size(theme::FONT_SMALL)
+            .color(theme::text_muted()),
+    );
 }
 
 fn error_bubble(ui: &mut Ui, text: &str) {
@@ -1376,15 +1420,33 @@ fn run_completed_card(ui: &mut Ui, run_id: &str, text: &str) -> Option<EngineCom
         // Text and action on separate rows: a wrapped label next to a button
         // in one `horizontal` fills the full width first and pushes the
         // button past the bubble, where the side panel clips it.
-        widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
-        ui.add_space(6.0);
-        if widgets::ghost_button(ui, "Show details").clicked() {
-            command = Some(EngineCommand::InspectRun {
-                run_id: run_id.to_owned(),
-            });
-        }
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            let (summary, token_usage) = split_trailing_token_usage(text);
+            widgets::wrapped_label(ui, RichText::new(summary).color(theme::text()));
+            if let Some(token_usage) = token_usage {
+                ui.add_space(4.0);
+                token_usage_subline(ui, token_usage);
+            }
+            ui.add_space(6.0);
+            if widgets::ghost_button(ui, "Show details").clicked() {
+                command = Some(EngineCommand::InspectRun {
+                    run_id: run_id.to_owned(),
+                });
+            }
+        });
     });
     command
+}
+
+fn split_trailing_token_usage(text: &str) -> (&str, Option<&str>) {
+    let Some((summary, token_usage)) = text.rsplit_once('\n') else {
+        return (text, None);
+    };
+    if token_usage.starts_with("Claude tokens: ") || token_usage.starts_with("Tokens: ") {
+        (summary, Some(token_usage))
+    } else {
+        (text, None)
+    }
 }
 
 /// Contextual status strip shown only while working or waiting for the user.
@@ -1865,6 +1927,7 @@ fn design_action_bar(ui: &mut Ui, state: &mut ChatState, engine: &EngineHandle, 
             spec: flow.spec(),
             design: Some(Box::new(design)),
             conversation: flow.conversation.clone(),
+            creation_session_id: flow.creation_session_id.clone(),
         });
     }
     ui.add_space(2.0);
@@ -2440,6 +2503,7 @@ fn continue_to_design(state: &mut ChatState, engine: &EngineHandle) {
         conversation: flow.conversation.clone(),
         previous_design: None,
         feedback: None,
+        creation_session_id: flow.creation_session_id.clone(),
     });
 }
 
@@ -3196,6 +3260,7 @@ fn handle_intent_message(
             engine.send(EngineCommand::AssessIntent {
                 intent: flow.intent.clone(),
                 conversation: flow.conversation.clone(),
+                creation_session_id: flow.creation_session_id.clone(),
             });
         }
         Some(FlowPhase::Design) => {
@@ -3206,6 +3271,7 @@ fn handle_intent_message(
                 conversation: flow.conversation.clone(),
                 previous_design: flow.design.clone().map(Box::new),
                 feedback: Some(text),
+                creation_session_id: flow.creation_session_id.clone(),
             });
         }
         None if was_blank => {
@@ -3213,6 +3279,7 @@ fn handle_intent_message(
             engine.send(EngineCommand::AssessIntent {
                 intent: text,
                 conversation: flow.conversation.clone(),
+                creation_session_id: flow.creation_session_id.clone(),
             });
             state.flow = Some(flow);
         }
@@ -3227,6 +3294,12 @@ fn handle_intent_message(
 
 /// Turn a finished run into a short summary line for the conversation.
 pub fn run_summary_text(run: &Run) -> String {
+    run_summary_text_with_usage(run, true)
+}
+
+/// Turn a finished run into a summary. `show_claude_usage` controls only the
+/// recorded Claude totals; the per-step token summary is always shown.
+pub fn run_summary_text_with_usage(run: &Run, show_claude_usage: bool) -> String {
     let duration = run
         .finished_at
         .map(|end| end - run.started_at)
@@ -3248,16 +3321,18 @@ pub fn run_summary_text(run: &Run) -> String {
         other => format!("Run ended with status: {other}."),
     };
 
-    let mut text = match token_usage_text(run) {
-        Some(tokens) => format!("{headline}\n{tokens}"),
-        None => headline,
-    };
+    let mut text = headline;
 
     if run.status == RunStatus::Succeeded
         && let Some(final_result) = final_result_text(run)
     {
         text.push_str("\n\n");
         text.push_str(&final_result);
+    }
+
+    if let Some(tokens) = token_usage_text(run, show_claude_usage) {
+        text.push('\n');
+        text.push_str(&tokens);
     }
 
     text
@@ -3287,7 +3362,13 @@ fn format_output_value(value: &serde_json::Value) -> String {
 
 /// A one-line token-consumption summary for a finished run, or `None` when
 /// no prompt or agent step reported usage.
-fn token_usage_text(run: &Run) -> Option<String> {
+fn token_usage_text(run: &Run, show_claude_usage: bool) -> Option<String> {
+    // Provider-reported Claude usage is exact and covers failed attempts, so
+    // it replaces the per-step summary whenever any call was recorded.
+    let claude = run.claude_totals();
+    if show_claude_usage && !claude.is_empty() {
+        return Some(crate::app::usage::run_totals_text(&claude));
+    }
     let summary = run.token_usage_summary();
     if summary.is_empty() {
         return None;
@@ -3329,6 +3410,8 @@ pub fn binding_from_run(run: &Run) -> RunBinding {
 /// binding — everything the plan card displays.
 fn fill_binding(binding: &mut RunBinding, run: &Run) {
     binding.inputs = run.inputs.clone();
+    let usage = run.token_usage_summary();
+    binding.token_usage_total = (!usage.is_empty()).then_some(usage.usage.total());
     for (step_id, sr) in &run.step_runs {
         if sr.status != StepRunStatus::Pending || !binding.iterations.contains_key(step_id) {
             binding.statuses.insert(step_id.clone(), sr.status.clone());
@@ -3352,6 +3435,11 @@ fn fill_binding(binding: &mut RunBinding, run: &Run) {
             binding
                 .iterations
                 .insert(step_id.clone(), sr.iterations.clone());
+        }
+        if !sr.claude_calls.is_empty() {
+            binding
+                .claude_calls
+                .insert(step_id.clone(), sr.claude_calls.clone());
         }
     }
     binding.finished = Some(run.status.clone());
@@ -3761,10 +3849,37 @@ mod tests {
         let mut run = succeeded_run();
         run.outputs
             .insert("summary".to_owned(), serde_json::json!("all good"));
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 12,
+            output_tokens: 4,
+        });
+        run.step_runs.insert("summarize".to_owned(), step);
+
         let summary = run_summary_text(&run);
         assert!(
             summary.contains("Final result:\n- summary: all good"),
             "got: {summary}"
+        );
+        assert!(
+            summary.ends_with("Tokens: 1 AI step — 12 in / 4 out (16 total)."),
+            "token usage should follow the final result, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn trailing_run_usage_splits_after_final_result() {
+        let text = "Run succeeded in 8.6 s.\n\nFinal result:\n- summary: all good\nClaude tokens: 3 calls — 12,450 in (8,120 cached) / 1,320 out (13,770 total).";
+
+        let (summary, token_usage) = split_trailing_token_usage(text);
+
+        assert_eq!(
+            summary,
+            "Run succeeded in 8.6 s.\n\nFinal result:\n- summary: all good"
+        );
+        assert_eq!(
+            token_usage,
+            Some("Claude tokens: 3 calls — 12,450 in (8,120 cached) / 1,320 out (13,770 total).")
         );
     }
 
@@ -3781,6 +3896,82 @@ mod tests {
         assert!(
             run_summary_text(&run).contains("Tokens: 1 AI step — 120 in / 30 out (150 total).")
         );
+        assert_eq!(binding_from_run(&run).token_usage_total, Some(150));
+    }
+
+    #[test]
+    fn run_summary_prefers_recorded_claude_usage() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+        });
+        step.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "call-1".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 4330,
+                "cache_read_input_tokens": 8120,
+                "output_tokens": 1320
+            })),
+        }];
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text(&run);
+        assert!(
+            summary.contains(
+                "Claude tokens: 1 call — 12,450 in (8,120 cached) / 1,320 out (13,770 total)."
+            ),
+            "got: {summary}"
+        );
+        assert!(!summary.contains("AI step"), "got: {summary}");
+        let binding = binding_from_run(&run);
+        assert_eq!(binding.claude_calls["summarize"].len(), 1);
+    }
+
+    #[test]
+    fn disabling_claude_usage_keeps_the_provider_agnostic_token_summary() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+        });
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text_with_usage(&run, false);
+        assert!(
+            summary.contains("Tokens: 1 AI step — 120 in / 30 out (150 total)."),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn disabling_claude_usage_hides_recorded_claude_totals() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+        });
+        step.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "call-1".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 4330,
+                "output_tokens": 1320
+            })),
+        }];
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text_with_usage(&run, false);
+        assert!(!summary.contains("Claude tokens:"), "got: {summary}");
+        assert!(summary.contains("Tokens: 1 AI step"), "got: {summary}");
     }
 
     #[test]

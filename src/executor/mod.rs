@@ -12,6 +12,7 @@
 
 pub mod dag;
 pub mod step_runners;
+mod usage;
 
 pub use crate::storage::runs::{Run, RunStatus, StepRun, StepRunIteration, StepRunStatus};
 
@@ -126,6 +127,10 @@ pub struct ExecutorConfig {
     pub human: Option<tokio::sync::mpsc::UnboundedSender<HumanRequest>>,
     /// Credentials for PROMPT_CALL steps (env-var fallback when unset).
     pub llm_keys: LlmKeys,
+    /// Whether Claude API usage is recorded for this execution.
+    pub claude_usage_enabled: bool,
+    /// Whether Claude API request bodies are retained for this execution.
+    pub claude_prompts_enabled: bool,
     /// Which surface asked for this execution; stamped on the run record so
     /// the Runs view can show where a run came from. Resume paths
     /// keep the run's existing value.
@@ -868,8 +873,19 @@ async fn run_step_with_policy(
             step_timeout_secs = timeout_secs.unwrap_or_default(),
             step_timeout_configured = timeout_secs.is_some()
         );
-        let execution =
-            run_step_with_child_progress(ctx.clone(), run, config).instrument(step_span);
+        let usage_recorder = usage::RunUsageRecorder::for_attempt(
+            Arc::clone(&config.storage),
+            config.claude_usage_enabled,
+            config.claude_prompts_enabled,
+            run,
+            &step_id,
+            attempt,
+        );
+        let execution = usage::with_attempt_usage(
+            Arc::clone(&usage_recorder),
+            run_step_with_child_progress(ctx.clone(), run, config),
+        )
+        .instrument(step_span);
         let (outcome, timed_out) = match timeout_secs {
             Some(secs) => match tokio::time::timeout(
                 Duration::from_secs(secs.saturating_add(timeout_grace_secs)),
@@ -888,6 +904,9 @@ async fn run_step_with_policy(
             },
             None => (execution.await, false),
         };
+        // Calls of failed and timed-out attempts are kept as well; the saves
+        // below (or the caller's, on success) persist them with the run.
+        usage_recorder.drain_into(run);
         let attempt_duration_ms = attempt_started.elapsed().as_millis() as u64;
 
         match outcome {
@@ -1142,6 +1161,8 @@ mod execution_policy_tests {
             progress,
             human,
             llm_keys: LlmKeys::default(),
+            claude_usage_enabled: true,
+            claude_prompts_enabled: false,
             source: None,
         }
     }

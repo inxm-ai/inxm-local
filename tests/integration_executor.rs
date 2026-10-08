@@ -94,6 +94,8 @@ async fn single_step_plan_succeeds() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -146,6 +148,8 @@ async fn plan_level_output_is_resolved_from_step_result() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -189,6 +193,8 @@ async fn declared_input_is_resolved_and_persisted_for_the_run() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -233,6 +239,8 @@ async fn missing_required_input_is_rejected_before_a_run_is_created() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -271,6 +279,8 @@ async fn chain_plan_executes_in_order() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -369,6 +379,8 @@ async fn code_call_passes_step_output_through_static_script_stdin() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -448,6 +460,8 @@ async fn code_call_streams_large_placeholder_through_stdin() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -514,6 +528,8 @@ async fn code_call_argument_placeholder_resolves_plan_input() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -613,6 +629,8 @@ async fn fan_out_templates_record_iterations_before_human_pause() {
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
     let execution = tokio::spawn(async move { execute(plan, config).await });
@@ -748,6 +766,8 @@ async fn fan_out_until_persists_only_iterations_through_the_first_match() {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -844,6 +864,8 @@ async fn fan_out_persists_failed_child_iteration() {
         progress: Some(progress_tx),
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -951,6 +973,8 @@ async fn failed_step_leaves_unstarted_downstream_pending() {
         progress: Some(progress_tx),
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
 
@@ -1048,6 +1072,8 @@ async fn condition_skip_survives_human_resume() {
         progress: None,
         human: Some(human_tx),
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
     let first_plan = plan.clone();
@@ -1086,6 +1112,8 @@ async fn condition_skip_survives_human_resume() {
         progress: None,
         human: Some(human_tx),
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
     let resumed = tokio::spawn(async move { resume(plan, resume_config, waiting).await });
@@ -1229,6 +1257,8 @@ async fn run_until_flaky_fails(storage: Arc<StorageRoot>, plan: Plan) -> inxm_lo
         progress: Some(progress_tx),
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
     assert!(execute(plan, config).await.is_err(), "flaky must fail");
@@ -1256,6 +1286,8 @@ fn resume_config(storage: Arc<StorageRoot>) -> ExecutorConfig {
         progress: None,
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     }
 }
@@ -1490,6 +1522,8 @@ async fn run_until_flaky_fails_with_inputs(
         progress: Some(progress_tx),
         human: None,
         llm_keys: Default::default(),
+        claude_usage_enabled: false,
+        claude_prompts_enabled: false,
         source: None,
     };
     assert!(execute(plan, config).await.is_err(), "flaky must fail");

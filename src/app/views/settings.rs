@@ -174,7 +174,6 @@ pub fn show(
                 });
             });
 
-            ui.add_space(12.0);
             theme::card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 widgets::section_label(ui, "Compiler");
@@ -198,6 +197,92 @@ pub fn show(
                     engine.send(EngineCommand::SaveSettings {
                         settings: Box::new(state.draft.clone()),
                     });
+                }
+
+                if matches!(
+                    state.draft.backend,
+                    BackendChoice::Claude | BackendChoice::Auto
+                ) {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    widgets::section_label(ui, "Token usage");
+                    ui.add_space(2.0);
+                    if ui
+                        .checkbox(
+                            &mut state.draft.claude_usage_enabled,
+                            "Record and show Claude token usage",
+                        )
+                        .changed()
+                    {
+                        engine.send(EngineCommand::SaveSettings {
+                            settings: Box::new(state.draft.clone()),
+                        });
+                    }
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(
+                            "Records provider-reported token totals for direct Anthropic API calls and shows them in plan and run summaries. Turning this off does not delete existing local usage history.",
+                        )
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_faint()),
+                    );
+                    ui.add_space(6.0);
+                    let prompt_capture_enabled = crate::llm::claude_usage_enabled(
+                        state.draft.claude_usage_enabled,
+                    );
+                    if ui
+                        .add_enabled_ui(prompt_capture_enabled, |ui| {
+                            ui.checkbox(
+                                &mut state.draft.claude_prompts_enabled,
+                                "Store Claude API messages",
+                            )
+                        })
+                        .inner
+                        .changed()
+                    {
+                        engine.send(EngineCommand::SaveSettings {
+                            settings: Box::new(state.draft.clone()),
+                        });
+                    }
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(
+                            "Saves exact request and response bodies with each direct Claude API record. Messages can contain plan inputs and model output.",
+                        )
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_faint()),
+                    );
+                    if !prompt_capture_enabled {
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new("Enable Claude API usage recording to store messages.")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::text_faint()),
+                        );
+                    }
+                    if crate::llm::store_claude_prompts() {
+                        ui.add_space(4.0);
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(
+                                "Currently enabled by INXM_STORE_CLAUDE_PROMPTS for this process.",
+                            )
+                            .size(theme::FONT_SMALL)
+                            .color(theme::warn()),
+                        );
+                    }
+                    if crate::llm::claude_usage_runtime_disabled() {
+                        ui.add_space(4.0);
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(
+                                "Currently forced off by INXM_CLAUDE_USAGE=off — no usage is recorded regardless of this checkbox.",
+                            )
+                            .size(theme::FONT_SMALL)
+                            .color(theme::warn()),
+                        );
+                    }
                 }
 
                 ui.add_space(10.0);
@@ -774,8 +859,6 @@ pub fn show(
                                 ui,
                                 if checking {
                                     "Checking…"
-                                } else if cooling_down {
-                                    "Up to date"
                                 } else {
                                     "Check for updates"
                                 },
