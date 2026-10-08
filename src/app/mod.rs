@@ -2657,6 +2657,9 @@ impl eframe::App for InxmApp {
                                     Some(RunsAction::Abort { run_id }) => {
                                         self.engine.send(EngineCommand::AbortRun { run_id });
                                     }
+                                    Some(RunsAction::Delete { run_id }) => {
+                                        self.engine.send(EngineCommand::DeleteRun { run_id });
+                                    }
                                     _ => {}
                                 }
                             }
