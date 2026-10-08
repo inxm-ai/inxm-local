@@ -21,6 +21,11 @@ tokio::task_local! {
     static RUN_USAGE: Arc<RunUsageRecorder>;
 }
 
+/// Effective usage-recording setting for the current step attempt.
+pub(crate) fn current_usage_enabled() -> Option<bool> {
+    RUN_USAGE.try_with(|recorder| recorder.enabled).ok()
+}
+
 pub(crate) struct RunUsageRecorder {
     storage: Arc<StorageRoot>,
     enabled: bool,
