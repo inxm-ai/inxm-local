@@ -1687,7 +1687,7 @@ impl InxmApp {
         ui.horizontal(|ui| {
             ui.add_space(16.0);
             ui.label(
-                RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                RichText::new(crate::version::DISPLAY)
                     .size(theme::FONT_SMALL)
                     .color(theme::text_faint()),
             );

@@ -732,7 +732,7 @@ pub fn show(
                 widgets::section_label(ui, "About");
                 ui.add_space(2.0);
                 ui.label(
-                    RichText::new(format!("inxm-local v{}", env!("CARGO_PKG_VERSION")))
+                    RichText::new(format!("inxm-local {}", crate::version::DISPLAY))
                         .color(theme::text_muted()),
                 );
                 ui.hyperlink_to("Releases on GitHub", RELEASES_URL);
