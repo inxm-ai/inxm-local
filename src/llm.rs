@@ -161,6 +161,228 @@ pub struct CompletionResponse {
     pub text: String,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Full provider-reported usage; only the Anthropic Messages path sets it.
+    pub usage: Option<ClaudeUsage>,
+}
+
+/// Provider-reported `usage` of one Anthropic Messages API response.
+/// Absent or null fields stay `None`; nothing is estimated.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_creation_input_tokens: Option<u64>,
+    pub cache_read_input_tokens: Option<u64>,
+    pub cache_creation_5m_input_tokens: Option<u64>,
+    pub cache_creation_1h_input_tokens: Option<u64>,
+    /// Subset of `output_tokens`; observability only, never added on top.
+    pub thinking_tokens: Option<u64>,
+    pub web_search_requests: Option<u64>,
+    pub web_fetch_requests: Option<u64>,
+    pub service_tier: Option<String>,
+    pub inference_geo: Option<String>,
+    /// Verbatim `usage` object so future fields are not lost.
+    pub raw: serde_json::Value,
+}
+
+impl ClaudeUsage {
+    /// Uncached input plus cache writes plus cache reads (non-overlapping).
+    /// `None` when the provider did not report `input_tokens`.
+    pub fn total_input(&self) -> Option<u64> {
+        self.input_tokens.map(|input| {
+            input
+                + self.cache_creation_input_tokens.unwrap_or(0)
+                + self.cache_read_input_tokens.unwrap_or(0)
+        })
+    }
+
+    /// `output_tokens` already includes thinking.
+    pub fn total_output(&self) -> Option<u64> {
+        self.output_tokens
+    }
+
+    pub fn total(&self) -> Option<u64> {
+        Some(self.total_input()? + self.total_output()?)
+    }
+}
+
+/// Parse a Messages API `usage` object; `None` when it is absent or not an object.
+pub fn parse_claude_usage(usage: &serde_json::Value) -> Option<ClaudeUsage> {
+    if !usage.is_object() {
+        return None;
+    }
+    let string = |value: &serde_json::Value| value.as_str().map(str::to_owned);
+    Some(ClaudeUsage {
+        input_tokens: usage["input_tokens"].as_u64(),
+        output_tokens: usage["output_tokens"].as_u64(),
+        cache_creation_input_tokens: usage["cache_creation_input_tokens"].as_u64(),
+        cache_read_input_tokens: usage["cache_read_input_tokens"].as_u64(),
+        cache_creation_5m_input_tokens: usage["cache_creation"]["ephemeral_5m_input_tokens"]
+            .as_u64(),
+        cache_creation_1h_input_tokens: usage["cache_creation"]["ephemeral_1h_input_tokens"]
+            .as_u64(),
+        thinking_tokens: usage["output_tokens_details"]["thinking_tokens"].as_u64(),
+        web_search_requests: usage["server_tool_use"]["web_search_requests"].as_u64(),
+        web_fetch_requests: usage["server_tool_use"]["web_fetch_requests"].as_u64(),
+        service_tier: string(&usage["service_tier"]),
+        inference_geo: string(&usage["inference_geo"]),
+        raw: usage.clone(),
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ClaudeCallOutcome {
+    /// Text extracted.
+    Ok,
+    /// HTTP 200 with usage but no text block (billed).
+    NoTextBlock,
+    /// Non-2xx response; no usage, not billed by Anthropic.
+    HttpError { status: u16 },
+    /// Timeout or connection failure; usage unknown.
+    TransportError,
+    /// HTTP 200 but the body is not JSON; usage unknown.
+    InvalidJson,
+}
+
+/// Everything Anthropic returned for one Messages API call. Never carries
+/// request headers or the API key.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeCall {
+    /// Response `id` (`msg_…`).
+    pub message_id: Option<String>,
+    /// `request-id` response header.
+    pub request_id: Option<String>,
+    pub model_requested: String,
+    pub model_reported: Option<String>,
+    pub http_status: Option<u16>,
+    pub stop_reason: Option<String>,
+    /// All response headers except `set-cookie`.
+    pub response_headers: IndexMap<String, String>,
+    /// Verbatim response body; retained only when Claude message storage is on.
+    pub response_body: Option<serde_json::Value>,
+    /// Exact JSON request body; retained only when Claude message storage is on.
+    pub request_body: Option<serde_json::Value>,
+    pub outcome: ClaudeCallOutcome,
+    pub usage: Option<ClaudeUsage>,
+    pub latency_ms: u64,
+    pub started_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Receives every recorded Anthropic API call made inside a
+/// [`with_usage_recorder`] scope. Implemented by the layer that knows the
+/// attribution (plan creation phase, run step attempt, ...).
+pub trait UsageRecorder: Send + Sync {
+    fn record(&self, call: ClaudeCall);
+    /// Phase hint from inner layers (e.g. the compiler operation name).
+    fn set_phase(&self, _phase: &str) {}
+    /// Whether request and response bodies are retained with recorded calls.
+    fn store_prompts(&self) -> bool {
+        store_claude_prompts()
+    }
+}
+
+tokio::task_local! {
+    /// The recorder for the current async task tree, set via [`with_usage_recorder`].
+    static USAGE_RECORDER: std::sync::Arc<dyn UsageRecorder>;
+}
+
+/// Run `future` with `recorder` receiving every Anthropic API call made
+/// inside it (including nested retries). Without a scope nothing is recorded.
+pub async fn with_usage_recorder<F: std::future::Future>(
+    recorder: std::sync::Arc<dyn UsageRecorder>,
+    future: F,
+) -> F::Output {
+    USAGE_RECORDER.scope(recorder, future).await
+}
+
+/// Forward a phase label to the active recorder, if any.
+pub fn set_usage_phase(phase: &str) {
+    if let Some(recorder) = active_usage_recorder() {
+        recorder.set_phase(phase);
+    }
+}
+
+fn active_usage_recorder() -> Option<std::sync::Arc<dyn UsageRecorder>> {
+    USAGE_RECORDER.try_with(|recorder| recorder.clone()).ok()
+}
+
+/// Hand `call` to the active recorder, as the Anthropic transport does. Lets
+/// tests with a stubbed transport exercise recorder scopes.
+#[cfg(test)]
+pub(crate) fn record_in_active_scope(call: ClaudeCall) {
+    if let Some(recorder) = active_usage_recorder() {
+        recorder.record(call);
+    }
+}
+
+/// Environment switch that stores Claude request and response bodies.
+pub const STORE_CLAUDE_PROMPTS_ENV: &str = "INXM_STORE_CLAUDE_PROMPTS";
+/// Environment switch that disables local Claude usage recording for this process.
+pub const CLAUDE_USAGE_ENV: &str = "INXM_CLAUDE_USAGE";
+
+/// Whether local Claude usage recording is enabled for this process.
+///
+/// The environment variable is a one-way kill switch, matching telemetry:
+/// `off`, `0`, `false`, and `no` disable recording but cannot override a
+/// disabled persisted setting.
+pub fn claude_usage_enabled(setting: bool) -> bool {
+    claude_usage_enabled_with_env(setting, std::env::var(CLAUDE_USAGE_ENV).ok().as_deref())
+}
+
+fn claude_usage_enabled_with_env(setting: bool, env_value: Option<&str>) -> bool {
+    setting
+        && !env_value.is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "off" | "false" | "no"
+            )
+        })
+}
+
+/// Whether the environment currently forces Claude usage recording off.
+pub fn claude_usage_runtime_disabled() -> bool {
+    !claude_usage_enabled(true)
+}
+
+/// Whether request bodies are attached to recorded calls. Read once per
+/// process; warns once when enabled.
+pub fn store_claude_prompts() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let enabled =
+            store_prompts_flag(std::env::var(STORE_CLAUDE_PROMPTS_ENV).ok().as_deref());
+        if enabled {
+            tracing::warn!(
+                "{STORE_CLAUDE_PROMPTS_ENV} is enabled: Claude request bodies are written to llm-usage/requests/"
+            );
+        }
+        enabled
+    })
+}
+
+/// Whether Claude API message storage is enabled by the persisted setting or
+/// explicit process-level environment opt-in.
+pub fn claude_prompts_enabled(setting: bool) -> bool {
+    setting || store_claude_prompts()
+}
+
+/// Only an explicit `1`/`true`/`yes`/`on` enables it; anything else is off.
+fn store_prompts_flag(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
+}
+
+/// Only calls to the real Anthropic API are recorded.
+fn is_anthropic_api(base_url: &str) -> bool {
+    reqwest::Url::parse(base_url.trim()).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.anthropic.com"))
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -259,21 +481,30 @@ fn apply_headers(
     Ok(builder)
 }
 
+fn build_json_request(
+    profile: &LlmProfile,
+    url: String,
+    extra_headers: &[(&'static str, &'static str)],
+    body: &serde_json::Value,
+) -> Result<reqwest::RequestBuilder, LlmError> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(profile.timeout_secs))
+        .build()
+        .map_err(|e| LlmError::Request(e.to_string()))?;
+    let mut builder = client.post(url).json(body);
+    for (name, value) in extra_headers {
+        builder = builder.header(*name, *value);
+    }
+    apply_headers(builder, profile)
+}
+
 async fn send_json(
     profile: &LlmProfile,
     url: String,
     extra_headers: &[(&'static str, &'static str)],
     body: serde_json::Value,
 ) -> Result<serde_json::Value, LlmError> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(profile.timeout_secs))
-        .build()
-        .map_err(|e| LlmError::Request(e.to_string()))?;
-    let mut builder = client.post(url).json(&body);
-    for (name, value) in extra_headers {
-        builder = builder.header(*name, *value);
-    }
-    let request = apply_headers(builder, profile)?;
+    let request = build_json_request(profile, url, extra_headers, &body)?;
     let response = request
         .send()
         .await
@@ -283,18 +514,43 @@ async fn send_json(
         .text()
         .await
         .map_err(|e| LlmError::Request(e.to_string()))?;
+    json_body(status, &text)
+}
+
+/// Map a raw HTTP status and body to parsed JSON or the matching error.
+fn json_body(status: reqwest::StatusCode, text: &str) -> Result<serde_json::Value, LlmError> {
     if !status.is_success() {
         return Err(LlmError::Http {
             status,
-            message: truncate(&text, ERROR_BODY_EXCERPT_CHARS),
+            message: truncate(text, ERROR_BODY_EXCERPT_CHARS),
         });
     }
-    serde_json::from_str(&text).map_err(|e| {
+    serde_json::from_str(text).map_err(|e| {
         LlmError::InvalidResponse(format!(
             "invalid JSON ({e}): {}",
-            truncate(&text, RAW_SNIPPET_EXCERPT_CHARS)
+            truncate(text, RAW_SNIPPET_EXCERPT_CHARS)
         ))
     })
+}
+
+/// Response headers for the record; `set-cookie` is dropped and repeated
+/// headers are joined with `, `.
+fn recorded_headers(headers: &reqwest::header::HeaderMap) -> IndexMap<String, String> {
+    let mut recorded: IndexMap<String, String> = IndexMap::new();
+    for (name, value) in headers {
+        if *name == reqwest::header::SET_COOKIE {
+            continue;
+        }
+        let value = String::from_utf8_lossy(value.as_bytes()).into_owned();
+        recorded
+            .entry(name.as_str().to_owned())
+            .and_modify(|existing| {
+                existing.push_str(", ");
+                existing.push_str(&value);
+            })
+            .or_insert(value);
+    }
+    recorded
 }
 
 async fn complete_openai(
@@ -330,12 +586,26 @@ async fn complete_openai(
         text: text.to_owned(),
         input_tokens: json["usage"]["prompt_tokens"].as_u64(),
         output_tokens: json["usage"]["completion_tokens"].as_u64(),
+        usage: None,
     })
 }
 
 async fn complete_anthropic(
     profile: &LlmProfile,
     request: CompletionRequest<'_>,
+) -> Result<CompletionResponse, LlmError> {
+    let recorder = is_anthropic_api(&profile.base_url)
+        .then(active_usage_recorder)
+        .flatten();
+    complete_anthropic_with(profile, request, recorder).await
+}
+
+/// `recorder` is `Some` only for real Anthropic API calls inside a
+/// recorder scope; tests pass one directly to exercise local servers.
+async fn complete_anthropic_with(
+    profile: &LlmProfile,
+    request: CompletionRequest<'_>,
+    recorder: Option<std::sync::Arc<dyn UsageRecorder>>,
 ) -> Result<CompletionResponse, LlmError> {
     let max_tokens = request
         .max_tokens
@@ -349,29 +619,107 @@ async fn complete_anthropic(
     if let Some(system) = request.system {
         body["system"] = serde_json::Value::String(system.to_owned());
     }
-    let json = send_json(
-        profile,
-        endpoint(&profile.base_url, "messages"),
-        &[("anthropic-version", ANTHROPIC_API_VERSION)],
-        body,
-    )
-    .await?;
-    parse_anthropic_response(&json, max_tokens)
+    let url = endpoint(&profile.base_url, "messages");
+    let extra_headers = [("anthropic-version", ANTHROPIC_API_VERSION)];
+    let Some(recorder) = recorder else {
+        let json = send_json(profile, url, &extra_headers, body).await?;
+        return parse_anthropic_response(&json, max_tokens);
+    };
+
+    // Configuration errors happen before anything is sent and are not recorded.
+    let builder = build_json_request(profile, url, &extra_headers, &body)?;
+    let store_messages = recorder.store_prompts();
+    let mut call = ClaudeCall {
+        message_id: None,
+        request_id: None,
+        model_requested: body["model"].as_str().unwrap_or_default().to_owned(),
+        model_reported: None,
+        http_status: None,
+        stop_reason: None,
+        response_headers: IndexMap::new(),
+        response_body: None,
+        request_body: store_messages.then(|| body.clone()),
+        outcome: ClaudeCallOutcome::TransportError,
+        usage: None,
+        latency_ms: 0,
+        started_at: chrono::Utc::now(),
+    };
+    let started = std::time::Instant::now();
+    let result = send_recorded(builder, &mut call, store_messages).await;
+    call.latency_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    recorder.record(call);
+    parse_anthropic_response(&result?, max_tokens)
+}
+
+/// Send an Anthropic request, filling `call` with everything the provider
+/// returned. Errors match [`send_json`].
+async fn send_recorded(
+    builder: reqwest::RequestBuilder,
+    call: &mut ClaudeCall,
+    store_messages: bool,
+) -> Result<serde_json::Value, LlmError> {
+    let response = builder
+        .send()
+        .await
+        .map_err(|e| LlmError::Request(e.to_string()))?;
+    let status = response.status();
+    call.http_status = Some(status.as_u16());
+    call.response_headers = recorded_headers(response.headers());
+    call.request_id = call.response_headers.get("request-id").cloned();
+    let text = response
+        .text()
+        .await
+        .map_err(|e| LlmError::Request(e.to_string()))?;
+    let parsed = serde_json::from_str::<serde_json::Value>(&text);
+    if store_messages {
+        call.response_body = Some(match &parsed {
+            Ok(json) => json.clone(),
+            Err(_) => serde_json::Value::String(text.clone()),
+        });
+    }
+    let json = match (status.is_success(), parsed) {
+        (true, Ok(json)) => json,
+        (success, _) => {
+            call.outcome = if success {
+                ClaudeCallOutcome::InvalidJson
+            } else {
+                ClaudeCallOutcome::HttpError {
+                    status: status.as_u16(),
+                }
+            };
+            return json_body(status, &text);
+        }
+    };
+    let string = |value: &serde_json::Value| value.as_str().map(str::to_owned);
+    call.message_id = string(&json["id"]);
+    call.model_reported = string(&json["model"]);
+    call.stop_reason = string(&json["stop_reason"]);
+    call.usage = parse_claude_usage(&json["usage"]);
+    call.outcome = if anthropic_text(&json).is_some() {
+        ClaudeCallOutcome::Ok
+    } else {
+        ClaudeCallOutcome::NoTextBlock
+    };
+    Ok(json)
+}
+
+fn anthropic_text(json: &serde_json::Value) -> Option<&str> {
+    json["content"]
+        .as_array()
+        .and_then(|blocks| blocks.iter().find(|block| block["type"] == "text"))
+        .and_then(|block| block["text"].as_str())
 }
 
 fn parse_anthropic_response(
     json: &serde_json::Value,
     max_tokens: u32,
 ) -> Result<CompletionResponse, LlmError> {
-    if let Some(text) = json["content"]
-        .as_array()
-        .and_then(|blocks| blocks.iter().find(|block| block["type"] == "text"))
-        .and_then(|block| block["text"].as_str())
-    {
+    if let Some(text) = anthropic_text(json) {
         return Ok(CompletionResponse {
             text: text.to_owned(),
             input_tokens: json["usage"]["input_tokens"].as_u64(),
             output_tokens: json["usage"]["output_tokens"].as_u64(),
+            usage: parse_claude_usage(&json["usage"]),
         });
     }
 
@@ -523,6 +871,7 @@ pub fn parse_vertex_response(json: &serde_json::Value) -> Result<CompletionRespo
         text,
         input_tokens: json["usageMetadata"]["promptTokenCount"].as_u64(),
         output_tokens: json["usageMetadata"]["candidatesTokenCount"].as_u64(),
+        usage: None,
     })
 }
 
@@ -1016,6 +1365,7 @@ async fn complete_custom_cli(
         text: String::from_utf8_lossy(&output.stdout).trim().to_owned(),
         input_tokens: None,
         output_tokens: None,
+        usage: None,
     })
 }
 
@@ -1103,6 +1453,7 @@ pub fn parse_codex_jsonl(raw: &str) -> Result<CompletionResponse, LlmError> {
         })?,
         input_tokens,
         output_tokens,
+        usage: None,
     })
 }
 
@@ -1124,6 +1475,7 @@ pub fn parse_claude_json(raw: &str) -> Result<CompletionResponse, LlmError> {
             .to_owned(),
         input_tokens: value["usage"]["input_tokens"].as_u64(),
         output_tokens: value["usage"]["output_tokens"].as_u64(),
+        usage: None,
     })
 }
 
@@ -1553,5 +1905,406 @@ mod tests {
         server.abort();
         assert_eq!(response.text, "gateway reply");
         assert_eq!(response.output_tokens, Some(3));
+    }
+
+    #[derive(Default)]
+    struct CollectingRecorder {
+        calls: std::sync::Mutex<Vec<ClaudeCall>>,
+        phases: std::sync::Mutex<Vec<String>>,
+        store_prompts: bool,
+    }
+
+    impl UsageRecorder for CollectingRecorder {
+        fn record(&self, call: ClaudeCall) {
+            self.calls.lock().unwrap().push(call);
+        }
+
+        fn set_phase(&self, phase: &str) {
+            self.phases.lock().unwrap().push(phase.to_owned());
+        }
+
+        fn store_prompts(&self) -> bool {
+            self.store_prompts
+        }
+    }
+
+    fn docs_usage() -> serde_json::Value {
+        serde_json::json!({
+            "input_tokens": 2095,
+            "output_tokens": 503,
+            "cache_creation_input_tokens": 2051,
+            "cache_read_input_tokens": 2051,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 2051,
+                "ephemeral_1h_input_tokens": 0
+            },
+            "output_tokens_details": {"thinking_tokens": 120},
+            "server_tool_use": {"web_search_requests": 1, "web_fetch_requests": 2},
+            "service_tier": "standard",
+            "inference_geo": "us"
+        })
+    }
+
+    /// Serve `response` for `POST /v1/messages` and return the base URL.
+    async fn anthropic_server(
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        body: String,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let handler = move || {
+            let headers = headers.clone();
+            let body = body.clone();
+            async move {
+                let mut response = axum::response::Response::builder().status(status);
+                for (name, value) in headers {
+                    response = response.header(name, value);
+                }
+                response.body(axum::body::Body::from(body)).unwrap()
+            }
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = axum::Router::new().route("/v1/messages", axum::routing::post(handler));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{address}/v1"), server)
+    }
+
+    fn anthropic_profile(base_url: String) -> LlmProfile {
+        let mut profile = http_profile(LlmProtocol::AnthropicMessages, base_url);
+        profile.api_key = "secret-test-key".to_owned();
+        profile.auth = LlmAuth::AnthropicKey;
+        profile
+    }
+
+    fn hello() -> CompletionRequest<'static> {
+        CompletionRequest {
+            system: Some("system"),
+            user: "hello",
+            model: None,
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    async fn recorded_call(
+        profile: &LlmProfile,
+    ) -> (Result<CompletionResponse, LlmError>, ClaudeCall) {
+        recorded_call_with_prompt_capture(profile, true).await
+    }
+
+    async fn recorded_call_with_prompt_capture(
+        profile: &LlmProfile,
+        store_prompts: bool,
+    ) -> (Result<CompletionResponse, LlmError>, ClaudeCall) {
+        let recorder = std::sync::Arc::new(CollectingRecorder {
+            store_prompts,
+            ..Default::default()
+        });
+        let result = complete_anthropic_with(
+            profile,
+            hello(),
+            Some(recorder.clone() as std::sync::Arc<dyn UsageRecorder>),
+        )
+        .await;
+        let mut calls = recorder.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "exactly one call must be recorded");
+        (result, calls.remove(0))
+    }
+
+    #[test]
+    fn parses_full_claude_usage() {
+        let usage = parse_claude_usage(&docs_usage()).unwrap();
+        assert_eq!(usage.input_tokens, Some(2095));
+        assert_eq!(usage.output_tokens, Some(503));
+        assert_eq!(usage.cache_creation_input_tokens, Some(2051));
+        assert_eq!(usage.cache_read_input_tokens, Some(2051));
+        assert_eq!(usage.cache_creation_5m_input_tokens, Some(2051));
+        assert_eq!(usage.cache_creation_1h_input_tokens, Some(0));
+        assert_eq!(usage.thinking_tokens, Some(120));
+        assert_eq!(usage.web_search_requests, Some(1));
+        assert_eq!(usage.web_fetch_requests, Some(2));
+        assert_eq!(usage.service_tier.as_deref(), Some("standard"));
+        assert_eq!(usage.inference_geo.as_deref(), Some("us"));
+        assert_eq!(usage.raw, docs_usage());
+        assert_eq!(usage.total_input(), Some(2095 + 2051 + 2051));
+        // Thinking is already part of output_tokens.
+        assert_eq!(usage.total_output(), Some(503));
+        assert_eq!(usage.total(), Some(2095 + 2051 + 2051 + 503));
+    }
+
+    #[test]
+    fn null_and_missing_usage_fields_stay_none() {
+        let usage = parse_claude_usage(&serde_json::json!({
+            "input_tokens": 10,
+            "cache_creation_input_tokens": null,
+            "cache_read_input_tokens": null,
+            "service_tier": null
+        }))
+        .unwrap();
+        assert_eq!(usage.cache_creation_input_tokens, None);
+        assert_eq!(usage.cache_read_input_tokens, None);
+        assert_eq!(usage.cache_creation_5m_input_tokens, None);
+        assert_eq!(usage.thinking_tokens, None);
+        assert_eq!(usage.service_tier, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_input(), Some(10));
+        assert_eq!(usage.total(), None, "unknown output must not become 0");
+        assert!(parse_claude_usage(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn anthropic_response_carries_full_usage() {
+        let response = serde_json::json!({
+            "content": [{"type": "text", "text": "answer"}],
+            "usage": docs_usage()
+        });
+        let result = parse_anthropic_response(&response, 1024).unwrap();
+        assert_eq!(result.input_tokens, Some(2095));
+        assert_eq!(result.usage.unwrap().cache_read_input_tokens, Some(2051));
+    }
+
+    #[test]
+    fn store_prompts_flag_needs_an_explicit_on_value() {
+        for value in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(store_prompts_flag(Some(value)), "{value:?} must enable");
+        }
+        for value in ["", "0", "false", "no", "off", "OFF", "enabled", "2"] {
+            assert!(!store_prompts_flag(Some(value)), "{value:?} must disable");
+        }
+        assert!(!store_prompts_flag(None));
+    }
+
+    #[test]
+    fn claude_usage_env_can_disable_but_not_enable_recording() {
+        assert!(claude_usage_enabled_with_env(true, None));
+        assert!(claude_usage_enabled_with_env(true, Some("on")));
+        assert!(!claude_usage_enabled_with_env(false, Some("on")));
+        for value in ["0", "off", "FALSE", " no "] {
+            assert!(
+                !claude_usage_enabled_with_env(true, Some(value)),
+                "{value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_real_anthropic_host_is_recorded() {
+        assert!(is_anthropic_api("https://api.anthropic.com"));
+        assert!(is_anthropic_api("https://API.anthropic.com/v1/"));
+        assert!(!is_anthropic_api("http://127.0.0.1:8080/v1"));
+        assert!(!is_anthropic_api("https://gateway.example.com/anthropic"));
+        assert!(!is_anthropic_api("https://api.anthropic.com.evil.example"));
+        assert!(!is_anthropic_api("not a url"));
+    }
+
+    #[tokio::test]
+    async fn records_successful_call_with_headers_and_body() {
+        let body = serde_json::json!({
+            "id": "msg_123",
+            "model": "claude-reported",
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "hi"}],
+            "usage": docs_usage()
+        });
+        let (base_url, server) = anthropic_server(
+            200,
+            vec![
+                ("content-type", "application/json"),
+                ("request-id", "req_abc"),
+                ("anthropic-ratelimit-tokens-remaining", "1000"),
+                ("set-cookie", "session=secret-cookie"),
+            ],
+            body.to_string(),
+        )
+        .await;
+        let (result, call) = recorded_call(&anthropic_profile(base_url)).await;
+        server.abort();
+
+        assert_eq!(result.unwrap().text, "hi");
+        assert_eq!(call.outcome, ClaudeCallOutcome::Ok);
+        assert_eq!(call.message_id.as_deref(), Some("msg_123"));
+        assert_eq!(call.request_id.as_deref(), Some("req_abc"));
+        assert_eq!(call.model_requested, "test-model");
+        assert_eq!(call.model_reported.as_deref(), Some("claude-reported"));
+        assert_eq!(call.stop_reason.as_deref(), Some("end_turn"));
+        assert_eq!(call.http_status, Some(200));
+        assert_eq!(call.response_body, Some(body));
+        assert_eq!(
+            call.request_body
+                .expect("message storage must retain the request body")["system"],
+            "system"
+        );
+        assert_eq!(
+            call.response_headers["anthropic-ratelimit-tokens-remaining"],
+            "1000"
+        );
+        assert!(!call.response_headers.contains_key("set-cookie"));
+        assert_eq!(call.usage.unwrap().total(), Some(2095 + 2051 + 2051 + 503));
+    }
+
+    #[tokio::test]
+    async fn records_request_body_when_recorder_enables_prompt_capture() {
+        let body = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let (base_url, server) = anthropic_server(200, vec![], body.to_string()).await;
+        let (result, call) =
+            recorded_call_with_prompt_capture(&anthropic_profile(base_url), true).await;
+        server.abort();
+
+        assert_eq!(result.unwrap().text, "ok");
+        let request_body = call
+            .request_body
+            .expect("prompt capture must store the request body");
+        assert_eq!(request_body["system"], "system");
+        assert_eq!(request_body["messages"][0]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn omits_request_and_response_bodies_when_message_storage_is_disabled() {
+        let body = serde_json::json!({
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1}
+        });
+        let (base_url, server) = anthropic_server(200, vec![], body.to_string()).await;
+        let (result, call) =
+            recorded_call_with_prompt_capture(&anthropic_profile(base_url), false).await;
+        server.abort();
+
+        assert_eq!(result.unwrap().text, "ok");
+        assert!(call.request_body.is_none());
+        assert!(call.response_body.is_none());
+        assert_eq!(call.usage.unwrap().total(), Some(2));
+    }
+
+    #[tokio::test]
+    async fn records_billed_usage_of_thinking_only_response() {
+        let body = serde_json::json!({
+            "id": "msg_thinking",
+            "stop_reason": "max_tokens",
+            "content": [{"type": "thinking", "thinking": "unfinished", "signature": "sig"}],
+            "usage": {"input_tokens": 40, "output_tokens": 1024}
+        });
+        let (base_url, server) = anthropic_server(200, vec![], body.to_string()).await;
+        let (result, call) = recorded_call(&anthropic_profile(base_url)).await;
+        server.abort();
+
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exhausted max_tokens")
+        );
+        assert_eq!(call.outcome, ClaudeCallOutcome::NoTextBlock);
+        assert_eq!(call.stop_reason.as_deref(), Some("max_tokens"));
+        let usage = call.usage.unwrap();
+        assert_eq!(usage.input_tokens, Some(40));
+        assert_eq!(usage.output_tokens, Some(1024));
+    }
+
+    #[tokio::test]
+    async fn records_http_error_body_and_headers_without_usage() {
+        let body = serde_json::json!({
+            "type": "error",
+            "error": {"type": "invalid_request_error", "message": "bad"}
+        });
+        let (base_url, server) = anthropic_server(
+            400,
+            vec![("request-id", "req_err"), ("retry-after", "3")],
+            body.to_string(),
+        )
+        .await;
+        let (result, call) = recorded_call(&anthropic_profile(base_url)).await;
+        server.abort();
+
+        assert!(matches!(result, Err(LlmError::Http { status, .. }) if status == 400));
+        assert_eq!(call.outcome, ClaudeCallOutcome::HttpError { status: 400 });
+        assert_eq!(call.http_status, Some(400));
+        assert_eq!(call.request_id.as_deref(), Some("req_err"));
+        assert_eq!(call.response_headers["retry-after"], "3");
+        assert_eq!(call.response_body, Some(body));
+        assert!(call.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn records_unparseable_body_verbatim() {
+        let (base_url, server) = anthropic_server(200, vec![], "not json".to_owned()).await;
+        let (result, call) = recorded_call(&anthropic_profile(base_url)).await;
+        server.abort();
+
+        assert!(matches!(result, Err(LlmError::InvalidResponse(_))));
+        assert_eq!(call.outcome, ClaudeCallOutcome::InvalidJson);
+        assert_eq!(
+            call.response_body,
+            Some(serde_json::Value::String("not json".to_owned()))
+        );
+        assert!(call.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn records_transport_error_with_unknown_usage() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let (result, call) =
+            recorded_call(&anthropic_profile(format!("http://{address}/v1"))).await;
+
+        assert!(matches!(result, Err(LlmError::Request(_))));
+        assert_eq!(call.outcome, ClaudeCallOutcome::TransportError);
+        assert_eq!(call.http_status, None);
+        assert!(call.response_body.is_none());
+        assert!(call.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn recorded_call_never_contains_the_api_key() {
+        let (base_url, server) = anthropic_server(
+            200,
+            vec![("request-id", "req_key")],
+            serde_json::json!({"content": [{"type": "text", "text": "ok"}]}).to_string(),
+        )
+        .await;
+        let (_, call) = recorded_call(&anthropic_profile(base_url)).await;
+        server.abort();
+
+        let serialized = serde_json::to_string(&call).unwrap();
+        assert!(!serialized.contains("secret-test-key"));
+        assert!(!serialized.contains("x-api-key"));
+    }
+
+    #[tokio::test]
+    async fn non_anthropic_host_is_not_recorded_even_in_scope() {
+        let (base_url, server) = anthropic_server(
+            200,
+            vec![],
+            serde_json::json!({
+                "content": [{"type": "text", "text": "gateway"}],
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            })
+            .to_string(),
+        )
+        .await;
+        let recorder = std::sync::Arc::new(CollectingRecorder::default());
+        let profile = anthropic_profile(base_url);
+        let response = with_usage_recorder(recorder.clone(), complete(&profile, hello()))
+            .await
+            .unwrap();
+        server.abort();
+
+        assert_eq!(response.text, "gateway");
+        assert!(recorder.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn usage_phase_reaches_the_scoped_recorder_only() {
+        // No scope: a no-op, not a panic.
+        set_usage_phase("compile");
+        let recorder = std::sync::Arc::new(CollectingRecorder::default());
+        with_usage_recorder(recorder.clone(), async {
+            set_usage_phase("design_correction");
+        })
+        .await;
+        assert_eq!(*recorder.phases.lock().unwrap(), vec!["design_correction"]);
     }
 }

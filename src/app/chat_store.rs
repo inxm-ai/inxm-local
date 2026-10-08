@@ -37,6 +37,10 @@ enum StoredMessage {
         role: Role,
         text: String,
     },
+    PlanCreated {
+        text: String,
+        token_usage: Option<String>,
+    },
     Error {
         text: String,
     },
@@ -137,6 +141,10 @@ fn to_stored(message: &ChatMessage) -> Option<StoredMessage> {
             role: message.role,
             text: text.clone(),
         }),
+        MessageBody::PlanCreated { text, token_usage } => Some(StoredMessage::PlanCreated {
+            text: text.clone(),
+            token_usage: token_usage.clone(),
+        }),
         MessageBody::Error(text) => Some(StoredMessage::Error { text: text.clone() }),
         MessageBody::RunStarted { run_id, text, .. } => Some(StoredMessage::RunStarted {
             run_id: run_id.clone(),
@@ -218,6 +226,10 @@ fn to_stored(message: &ChatMessage) -> Option<StoredMessage> {
 fn to_live(stored: StoredMessage) -> (Role, MessageBody) {
     match stored {
         StoredMessage::Text { role, text } => (role, MessageBody::Text(text)),
+        StoredMessage::PlanCreated { text, token_usage } => (
+            Role::Assistant,
+            MessageBody::PlanCreated { text, token_usage },
+        ),
         StoredMessage::Error { text } => (Role::Assistant, MessageBody::Error(text)),
         StoredMessage::RunStarted { run_id, text } => (
             Role::Assistant,
@@ -567,6 +579,13 @@ mod tests {
                 resolution: None,
             },
         );
+        chat.push(
+            Role::Assistant,
+            MessageBody::PlanCreated {
+                text: "Plan created".to_owned(),
+                token_usage: Some("Plan creation: 13,770 tokens spent".to_owned()),
+            },
+        );
         chat
     }
 
@@ -580,7 +599,7 @@ mod tests {
         let (loaded, loaded_created, plan_id) = load(tmp.path(), "s1").unwrap();
         assert_eq!(loaded_created, created);
         assert!(plan_id.is_none());
-        assert_eq!(loaded.messages.len(), 3);
+        assert_eq!(loaded.messages.len(), 4);
 
         // The unfinished run is marked cancelled, the open prompt expired.
         match &loaded.messages[1].body {
@@ -595,6 +614,15 @@ mod tests {
         match &loaded.messages[2].body {
             MessageBody::Human { resolution, .. } => assert!(resolution.is_some()),
             _ => panic!("expected human message"),
+        }
+        match &loaded.messages[3].body {
+            MessageBody::PlanCreated { token_usage, .. } => {
+                assert_eq!(
+                    token_usage.as_deref(),
+                    Some("Plan creation: 13,770 tokens spent")
+                );
+            }
+            _ => panic!("expected plan-created message"),
         }
     }
 

@@ -312,7 +312,8 @@ async fn run_spawn_step(
     let started_at = chrono::Utc::now();
     let timer = std::time::Instant::now();
 
-    let result = match run_step(spawn_ctx).await {
+    let spawn = crate::executor::usage::with_spawn_usage(spawn_id, iteration, run_step(spawn_ctx));
+    let result = match spawn.await {
         Ok(result) => result,
         Err(error) => {
             let error_text = error.to_string();

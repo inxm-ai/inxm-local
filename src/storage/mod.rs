@@ -13,8 +13,12 @@
 //!     {run-id}.json    — full run state
 //!   patches/
 //!     {patch-id}.json  — patch proposal + approval status
+//!   llm-usage/
+//!     plans/{plan-or-creation-id}.jsonl — append-only Claude API usage ledger
+//!     tools.jsonl                       — tool-synthesis calls outside any plan
 //! ```
 
+pub mod llm_usage;
 pub mod patches;
 pub mod plan_edits;
 pub mod plans;
@@ -37,6 +41,7 @@ const PATCHES_SUBDIR: &str = "patches";
 const PLAN_EDITS_SUBDIR: &str = "plan_edits";
 const REPAIR_TRANSACTIONS_SUBDIR: &str = "repair-transactions";
 const WORLD_FIXES_SUBDIR: &str = "world-fixes";
+const LLM_USAGE_SUBDIR: &str = "llm-usage";
 
 /// Suffix appended to a unique sibling file while new content is being written.
 /// The finished file is renamed over the target, so readers only ever see a
@@ -339,6 +344,7 @@ impl StorageRoot {
         std::fs::create_dir_all(root.join(PLAN_EDITS_SUBDIR))?;
         std::fs::create_dir_all(root.join(REPAIR_TRANSACTIONS_SUBDIR))?;
         std::fs::create_dir_all(root.join(WORLD_FIXES_SUBDIR))?;
+        std::fs::create_dir_all(root.join(LLM_USAGE_SUBDIR))?;
         let storage = Self {
             root,
             repair_commit_lock: Arc::new(Mutex::new(())),
@@ -395,6 +401,14 @@ impl StorageRoot {
 
     pub fn world_fixes(&self) -> world_fixes::WorldFixStore {
         world_fixes::WorldFixStore::new(self.world_fixes_dir())
+    }
+
+    pub fn llm_usage_dir(&self) -> PathBuf {
+        self.root.join(LLM_USAGE_SUBDIR)
+    }
+
+    pub fn llm_usage(&self) -> llm_usage::LlmUsageLog {
+        llm_usage::LlmUsageLog::new(self.llm_usage_dir())
     }
 
     /// Commit the persistence portion of an approved repair.

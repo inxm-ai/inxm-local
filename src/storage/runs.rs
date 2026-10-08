@@ -1,6 +1,7 @@
 //! Run state persistence.
 
 use crate::error::StorageError;
+use crate::storage::llm_usage::{ClaudeCallSummary, TokenTotals};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -146,6 +147,10 @@ pub struct StepRun {
     /// Executions of this template when it is owned by a FAN_OUT step.
     #[serde(default)]
     pub iterations: Vec<StepRunIteration>,
+    /// Every recorded Claude API call of this step, across all attempts,
+    /// including failed ones. FAN_OUT calls carry their iteration index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_calls: Vec<ClaudeCallSummary>,
 }
 
 impl StepRun {
@@ -163,7 +168,13 @@ impl StepRun {
             duration_ms: None,
             token_usage: None,
             iterations: Vec::new(),
+            claude_calls: Vec::new(),
         }
+    }
+
+    /// Provider-reported Claude usage of this step's recorded calls.
+    pub fn claude_totals(&self) -> TokenTotals {
+        TokenTotals::from_summaries(&self.claude_calls)
     }
 }
 
@@ -212,6 +223,15 @@ impl Run {
         self.step_runs
             .values()
             .find(|sr| sr.status == StepRunStatus::Failed)
+    }
+
+    /// Provider-reported Claude usage across every step's recorded calls.
+    pub fn claude_totals(&self) -> TokenTotals {
+        TokenTotals::from_summaries(
+            self.step_runs
+                .values()
+                .flat_map(|step_run| &step_run.claude_calls),
+        )
     }
 
     /// Aggregate token usage across every step that reported it, plus how many
@@ -704,5 +724,84 @@ mod tests {
         .unwrap();
 
         assert!(store.load(&requested_id).is_err());
+    }
+
+    fn claude_call(
+        attempt: u32,
+        outcome: crate::llm::ClaudeCallOutcome,
+        tokens: Option<(u64, u64)>,
+    ) -> ClaudeCallSummary {
+        ClaudeCallSummary {
+            call_id: format!("call-{attempt}"),
+            attempt,
+            iteration: None,
+            outcome,
+            usage: tokens.map(|(input, output)| crate::llm::ClaudeUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_5m_input_tokens: None,
+                cache_creation_1h_input_tokens: None,
+                thinking_tokens: None,
+                web_search_requests: None,
+                web_fetch_requests: None,
+                service_tier: None,
+                inference_geo: None,
+                raw: serde_json::json!({}),
+            }),
+        }
+    }
+
+    #[test]
+    fn failed_attempt_claude_calls_persist_with_the_run() {
+        use crate::llm::ClaudeCallOutcome;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let mut run = Run::new("plan-1", 1);
+        let mut step = StepRun::new("summarize");
+        step.claude_calls = vec![
+            claude_call(1, ClaudeCallOutcome::NoTextBlock, Some((100, 1024))),
+            claude_call(2, ClaudeCallOutcome::Ok, Some((100, 50))),
+        ];
+        run.step_runs.insert("summarize".to_owned(), step);
+        store.save(&run).unwrap();
+
+        let loaded = store.load(&run.id).unwrap();
+        assert_eq!(loaded, run);
+        let totals = loaded.claude_totals();
+        assert_eq!(totals.calls, 2);
+        assert_eq!(totals.total, 100 + 1024 + 100 + 50);
+        assert_eq!(loaded.step_runs["summarize"].claude_totals(), totals);
+    }
+
+    #[test]
+    fn run_json_without_claude_calls_still_loads() {
+        let run = Run::new("plan-1", 1);
+        let mut json = serde_json::to_value(&run).unwrap();
+        json["step_runs"] = serde_json::json!({
+            "summarize": {
+                "step_id": "summarize",
+                "status": "succeeded",
+                "started_at": null,
+                "finished_at": null,
+                "attempt": 1,
+                "stdout": null,
+                "stderr": null,
+                "error": null,
+                "duration_ms": 10,
+                "token_usage": {"input_tokens": 3, "output_tokens": 4}
+            }
+        });
+        let loaded: Run = serde_json::from_value(json).unwrap();
+        let step = &loaded.step_runs["summarize"];
+        assert!(step.claude_calls.is_empty());
+        assert!(loaded.claude_totals().is_empty());
+        assert!(
+            !serde_json::to_string(step)
+                .unwrap()
+                .contains("claude_calls"),
+            "empty call lists keep the old file shape"
+        );
     }
 }

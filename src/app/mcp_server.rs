@@ -799,14 +799,26 @@ async fn compile_plan_work(
     let settings = AppSettings::load(&state.paths.settings_path);
     let backend = engine::create_configured_backend(&settings)?;
     let request = engine::compile_request(&catalog, &settings, args.intent, None);
-    let plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        engine::compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "MCP compilation failed",
-            Some(&console),
+    let claude_usage = super::usage::LedgerRecorder::creation(
+        storage(state).ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &super::usage::new_creation_session_id(),
+        crate::storage::llm_usage::CreationPhase::Compile,
+        crate::storage::llm_usage::UsageOrigin::Mcp,
+        Some(console.clone()),
+    );
+    let plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            engine::compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "MCP compilation failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -829,6 +841,7 @@ async fn compile_plan_work(
             )
         },
     )?;
+    claude_usage.link_plan(&plan.metadata.id, plan.metadata.version);
     count_usage(state, crate::telemetry::usage::Action::PlanCreated);
     Ok(json!({ "plan": plan }))
 }
@@ -1162,16 +1175,28 @@ async fn edit_plan_work(
     let catalog = catalog(state)?;
     let settings = AppSettings::load(&state.paths.settings_path);
     let backend = engine::create_configured_backend(&settings)?;
+    let claude_usage = super::usage::LedgerRecorder::edit(
+        Some(storage.clone()),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &existing.metadata.id,
+        existing.metadata.version,
+        crate::storage::llm_usage::UsageOrigin::Mcp,
+        Some(console.clone()),
+    );
     let request =
         engine::edit_compile_request(&storage, &catalog, &settings, args.instruction, existing)?;
-    let plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        engine::compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "MCP plan edit failed",
-            Some(&console),
+    let plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            engine::compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "MCP plan edit failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -1240,6 +1265,8 @@ async fn execute_plan(state: &McpState, args: ExecuteArgs) -> anyhow::Result<Val
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: engine::llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         source: Some(crate::storage::runs::RunSource::Mcp),
     };
 
@@ -1519,6 +1546,8 @@ async fn resume_run(state: &McpState, args: ResumeRunArgs) -> anyhow::Result<Val
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: engine::llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         // Resume keeps the run's existing source.
         source: None,
     };
