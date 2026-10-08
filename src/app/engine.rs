@@ -5039,7 +5039,7 @@ pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/inxm-local/relea
 async fn check_for_updates(env: &EngineEnv, manual: bool) {
     let outcome: anyhow::Result<Option<(String, String)>> = async {
         let client = reqwest::Client::builder()
-            .user_agent(format!("inxm-local/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("inxm-local/{}", crate::version::DISPLAY))
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
         let response = client
@@ -5065,7 +5065,7 @@ async fn check_for_updates(env: &EngineEnv, manual: bool) {
             .to_owned();
         let latest = parse_semver(tag)
             .ok_or_else(|| anyhow::anyhow!("release response has invalid tag_name"))?;
-        let current = parse_semver(env!("CARGO_PKG_VERSION"))
+        let current = parse_semver(crate::version::DISPLAY)
             .ok_or_else(|| anyhow::anyhow!("application version is invalid"))?;
         Ok((latest > current).then(|| (tag.trim_start_matches('v').to_owned(), url)))
     }
