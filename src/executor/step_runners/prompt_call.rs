@@ -94,7 +94,12 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         "external runner completed"
     );
 
-    let usage = token_usage(&response);
+    let usage_recording_enabled = if crate::llm::is_anthropic_api(&profile.base_url) {
+        crate::executor::usage::current_usage_enabled()
+    } else {
+        None
+    };
+    let usage = token_usage(&response, usage_recording_enabled);
     let mut outputs = IndexMap::new();
     outputs.insert(
         cfg.output_field.clone(),
@@ -111,7 +116,13 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
 
 /// Step token usage for the run summary. Claude input includes cache reads
 /// and writes; usage is kept when either count was reported.
-fn token_usage(response: &crate::llm::CompletionResponse) -> Option<TokenUsage> {
+fn token_usage(
+    response: &crate::llm::CompletionResponse,
+    usage_recording_enabled: Option<bool>,
+) -> Option<TokenUsage> {
+    if response.usage.is_some() && usage_recording_enabled == Some(false) {
+        return None;
+    }
     let input = response
         .usage
         .as_ref()
@@ -200,16 +211,19 @@ mod tests {
 
     #[test]
     fn claude_input_includes_cache_reads_and_writes() {
-        let usage = token_usage(&response(
-            Some(10),
-            Some(5),
-            Some(serde_json::json!({
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cache_creation_input_tokens": 20,
-                "cache_read_input_tokens": 300
-            })),
-        ))
+        let usage = token_usage(
+            &response(
+                Some(10),
+                Some(5),
+                Some(serde_json::json!({
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 300
+                })),
+            ),
+            Some(true),
+        )
         .unwrap();
         assert_eq!(usage.input_tokens, 330);
         assert_eq!(usage.output_tokens, 5);
@@ -217,15 +231,47 @@ mod tests {
 
     #[test]
     fn output_only_usage_is_kept() {
-        let usage = token_usage(&response(None, Some(7), None)).unwrap();
+        let usage = token_usage(&response(None, Some(7), None), Some(true)).unwrap();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 7);
-        assert!(token_usage(&response(None, None, None)).is_none());
+        assert!(token_usage(&response(None, None, None), Some(true)).is_none());
     }
 
     #[test]
     fn non_claude_usage_falls_back_to_reported_counts() {
-        let usage = token_usage(&response(Some(4), Some(2), None)).unwrap();
+        let usage = token_usage(&response(Some(4), Some(2), None), Some(false)).unwrap();
         assert_eq!(usage.total(), 6);
+    }
+
+    #[test]
+    fn disabled_usage_recording_suppresses_claude_token_totals() {
+        let response = response(
+            Some(10),
+            Some(5),
+            Some(serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 300
+            })),
+        );
+
+        assert!(token_usage(&response, Some(false)).is_none());
+    }
+
+    #[test]
+    fn disabled_recording_does_not_hide_compatible_endpoint_summaries() {
+        let response = response(
+            Some(10),
+            Some(5),
+            Some(serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 300
+            })),
+        );
+
+        let usage = token_usage(&response, None).unwrap();
+        assert_eq!(usage.input_tokens, 310);
+        assert_eq!(usage.output_tokens, 5);
     }
 }
