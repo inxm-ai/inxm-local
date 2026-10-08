@@ -62,6 +62,10 @@ pub enum RunsAction {
     InspectReadOnly { run_id: String },
     /// Abort an in-progress run.
     Abort { run_id: String },
+    /// First click on ✕: ask the user to confirm.
+    AskDelete { run_id: String },
+    /// Confirmed deletion of a finished run.
+    Delete { run_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

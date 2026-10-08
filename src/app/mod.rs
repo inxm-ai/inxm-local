@@ -109,6 +109,7 @@ pub fn run_headless(paths: DataPaths, settings: engine::AppSettings) -> Headless
 fn spawn_headless_chat_writer(
     paths: DataPaths,
     events: std::sync::mpsc::Receiver<RoutedEngineEvent>,
+    show_usage: bool,
 ) {
     std::thread::Builder::new()
         .name("inxm-headless-chat".to_owned())
@@ -117,7 +118,8 @@ fn spawn_headless_chat_writer(
                 let Some(session_id) = routed.session_id else {
                     continue;
                 };
-                let Some((role, body)) = headless_message_body(routed.event) else {
+                let Some((role, body)) = headless_message_body_with_usage(routed.event, show_usage)
+                else {
                     continue;
                 };
                 if chat_store::append(&paths.data_dir, &session_id, role, body).is_err() {
@@ -138,7 +140,15 @@ fn spawn_headless_chat_writer(
 /// Map the subset of engine events a scheduled run produces to durable chat
 /// messages. Everything else (progress ticks, list refreshes) is dropped —
 /// it is either transient or has no headless meaning.
+#[cfg(test)]
 fn headless_message_body(event: EngineEvent) -> Option<(Role, MessageBody)> {
+    headless_message_body_with_usage(event, true)
+}
+
+fn headless_message_body_with_usage(
+    event: EngineEvent,
+    show_usage: bool,
+) -> Option<(Role, MessageBody)> {
     match event {
         EngineEvent::Assistant(text) => Some((Role::Assistant, MessageBody::Text(text))),
         EngineEvent::Failure(text) => Some((Role::Assistant, MessageBody::Error(text))),
@@ -171,7 +181,7 @@ fn headless_message_body(event: EngineEvent) -> Option<(Role, MessageBody)> {
             ))
         }
         EngineEvent::RunFinished { run } => {
-            let text = chat::run_summary_text(&run);
+            let text = chat::run_summary_text_with_usage(&run, show_usage);
             let body = if run.status.is_failed() {
                 MessageBody::RunFailed {
                     run_id: run.id.clone(),
@@ -334,6 +344,8 @@ pub struct InxmApp {
     /// safety, so using it for in-process navigation would make background
     /// work appear interrupted.
     parked_chats: std::collections::HashMap<String, ParkedChat>,
+    /// Sidebar chat whose ✕ was clicked once and awaits a second click.
+    pending_chat_delete: Option<String>,
     sessions: Vec<chat_store::SessionSummary>,
     last_saved_fingerprint: u64,
     run_sessions: std::collections::HashMap<String, String>,
@@ -532,6 +544,7 @@ impl InxmApp {
             session_id: uuid::Uuid::new_v4().to_string(),
             session_created_at: chrono::Utc::now(),
             parked_chats: Default::default(),
+            pending_chat_delete: None,
             sessions,
             last_saved_fingerprint,
             run_sessions: Default::default(),
@@ -974,13 +987,26 @@ impl InxmApp {
         self.ensure_plan_chat(&plan)
     }
 
-    fn delete_chat(&mut self, session_id: &str) {
-        let can_delete = self
+    fn can_delete_chat(&self, session_id: &str) -> bool {
+        let Some(session) = self
             .sessions
             .iter()
             .find(|session| session.id == session_id)
-            .is_some_and(|session| sidebar_chat_can_delete(session.plan_id.as_deref()));
-        if !can_delete {
+        else {
+            return false;
+        };
+        let live_chat = if session_id == self.session_id {
+            Some(&self.chat)
+        } else {
+            self.parked_chats.get(session_id).map(|parked| &parked.chat)
+        };
+        sidebar_chat_can_delete(live_chat, session.awaiting_input)
+    }
+
+    /// Removes only the conversation; a plan's chat is recreated on demand
+    /// by `open_plan_chat` / `ensure_plan_chat`.
+    fn delete_chat(&mut self, session_id: &str) {
+        if !self.can_delete_chat(session_id) {
             return;
         }
         chat_store::delete(&self.paths.data_dir, session_id);
@@ -1157,6 +1183,7 @@ impl InxmApp {
                             spec: flow.spec(),
                             design: Some(Box::new(design)),
                             conversation: flow.conversation.clone(),
+                            creation_session_id: flow.creation_session_id.clone(),
                         });
                     }
                 }
@@ -1826,8 +1853,10 @@ impl InxmApp {
 
         enum ChatAction {
             Open(String),
+            AskDelete(String),
             Delete(String),
         }
+        let pending_delete = self.pending_chat_delete.clone();
         let action = widgets::scroll_area_vertical()
             .id_salt("sidebar_chats")
             .auto_shrink([false, true])
@@ -1840,6 +1869,7 @@ impl InxmApp {
                     } else {
                         parked.is_some_and(|parked| parked.chat.is_active())
                     };
+                    let can_delete = self.can_delete_chat(&session.id);
                     ui.horizontal(|ui| {
                         ui.add_space(16.0);
                         if sidebar_chat_awaiting_input(
@@ -1861,36 +1891,40 @@ impl InxmApp {
                                 false => theme::text_muted(),
                             },
                         );
-                        let can_delete = sidebar_chat_can_delete(session.plan_id.as_deref());
-                        let width = ui.available_width() - if can_delete { 40.0 } else { 0.0 };
+                        let confirming = can_delete
+                            && pending_delete.as_deref() == Some(session.id.as_str());
+                        let width = ui.available_width() - if confirming { 64.0 } else { 40.0 };
                         let label = ui
                             .scope(|ui| {
                                 ui.set_max_width(width.max(48.0));
                                 ui.add(egui::Label::new(title).truncate().sense(Sense::click()))
                             })
                             .inner;
-                        let delete = can_delete.then(|| {
-                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let delete = ui
+                            .with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 ui.add_space(10.0);
-                                ui.add(
+                                let (glyph, color) = match confirming {
+                                    true => ("Delete?", theme::err()),
+                                    false => ("✕", theme::text_faint()),
+                                };
+                                ui.add_enabled(
+                                    can_delete,
                                     egui::Label::new(
-                                        RichText::new("✕")
-                                            .size(theme::FONT_SMALL)
-                                            .color(theme::text_faint()),
+                                        RichText::new(glyph).size(theme::FONT_SMALL).color(color),
                                     )
                                     .sense(Sense::click()),
                                 )
+                                .on_disabled_hover_text(
+                                    "Cannot delete this chat while work is running or awaiting input.",
+                                )
                             })
-                            .inner
-                        });
-                        if label.hovered() || delete.as_ref().is_some_and(egui::Response::hovered) {
+                            .inner;
+                        if label.hovered() || (can_delete && delete.hovered()) {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
                         }
-                        match (
-                            delete.as_ref().is_some_and(egui::Response::clicked),
-                            label.clicked(),
-                        ) {
-                            (true, _) => Some(ChatAction::Delete(session.id.clone())),
+                        match (delete.clicked(), label.clicked()) {
+                            (true, _) if confirming => Some(ChatAction::Delete(session.id.clone())),
+                            (true, _) => Some(ChatAction::AskDelete(session.id.clone())),
                             (_, true) => Some(ChatAction::Open(session.id.clone())),
                             _ => action,
                         }
@@ -1900,8 +1934,16 @@ impl InxmApp {
             })
             .inner;
         match action {
-            Some(ChatAction::Open(id)) => self.open_chat(&id),
-            Some(ChatAction::Delete(id)) => self.delete_chat(&id),
+            Some(ChatAction::Open(id)) => {
+                self.pending_chat_delete = None;
+                self.open_chat(&id);
+            }
+            Some(ChatAction::AskDelete(id)) => self.pending_chat_delete = Some(id),
+            Some(ChatAction::Delete(id)) => {
+                self.pending_chat_delete = None;
+                self.delete_chat(&id);
+            }
+            None if ui.input(|input| input.pointer.any_click()) => self.pending_chat_delete = None,
             None => {}
         }
     }
@@ -2159,6 +2201,13 @@ fn sidebar_chat_awaiting_input(
     }
 }
 
+fn sidebar_chat_can_delete(live_chat: Option<&ChatState>, stored_awaiting_input: bool) -> bool {
+    match live_chat {
+        Some(chat) => !chat.is_active() && !chat.awaiting_input(),
+        None => !stored_awaiting_input,
+    }
+}
+
 /// What the assistant says when a solution design arrives and the DESIGN
 /// phase waits for the approve button.
 const DESIGN_READY_ANNOUNCEMENT: &str = "Here's a proposed solution design — review it in the \
@@ -2177,12 +2226,6 @@ fn design_ready_announcement(auto_mode: bool) -> &'static str {
         true => DESIGN_READY_AUTO_ANNOUNCEMENT,
         false => DESIGN_READY_ANNOUNCEMENT,
     }
-}
-
-/// Chats become part of a plan's durable lifecycle once a plan is materialized.
-/// Those chats are removed only as part of deleting that plan from the overview.
-fn sidebar_chat_can_delete(plan_id: Option<&str>) -> bool {
-    plan_id.is_none()
 }
 
 /// What the background poll should re-fetch, given where the user is.
@@ -2695,12 +2738,6 @@ mod shell_tests {
     }
 
     #[test]
-    fn only_chats_without_a_materialized_plan_can_be_deleted() {
-        assert!(sidebar_chat_can_delete(None));
-        assert!(!sidebar_chat_can_delete(Some("plan-1")));
-    }
-
-    #[test]
     fn auto_mode_never_announces_an_approval_it_has_already_skipped() {
         assert!(design_ready_announcement(false).contains("approve"));
         let auto = design_ready_announcement(true);
@@ -2709,6 +2746,49 @@ mod shell_tests {
             "the skipped click stays visible"
         );
         assert!(!auto.contains("approve"));
+    }
+
+    #[test]
+    fn sidebar_chat_deletion_requires_idle_live_state() {
+        let mut chat = ChatState::default();
+        assert!(sidebar_chat_can_delete(Some(&chat), false));
+        assert!(sidebar_chat_can_delete(Some(&chat), true));
+
+        chat.busy = Some(chat::BusyState::new("Compiling", None));
+        assert!(!sidebar_chat_can_delete(Some(&chat), false));
+        chat.busy = None;
+        chat.push(
+            Role::Assistant,
+            MessageBody::RunStarted {
+                run_id: "run-1".to_owned(),
+                text: "Running".to_owned(),
+                active: true,
+            },
+        );
+        assert!(!sidebar_chat_can_delete(Some(&chat), false));
+    }
+
+    #[test]
+    fn sidebar_chat_deletion_blocks_unresolved_input() {
+        let mut chat = ChatState::default();
+        chat.push(
+            Role::Assistant,
+            MessageBody::Human {
+                prompt: "Approve?".to_owned(),
+                approval_required: true,
+                responder: None,
+                draft: String::new(),
+                resolution: None,
+            },
+        );
+        assert!(!chat.is_active());
+        assert!(!sidebar_chat_can_delete(Some(&chat), false));
+    }
+
+    #[test]
+    fn sidebar_chat_deletion_uses_saved_state_without_a_live_chat() {
+        assert!(sidebar_chat_can_delete(None, false));
+        assert!(!sidebar_chat_can_delete(None, true));
     }
 
     fn finished_run(status: RunStatus) -> Run {
