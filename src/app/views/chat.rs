@@ -2628,6 +2628,15 @@ fn help_card(ui: &mut Ui) {
 
 // ─── Input area with command palette ─────────────────────────────────────────
 
+fn consume_send_shortcut(ui: &mut Ui) -> bool {
+    ui.input_mut(|input| {
+        let control = input.consume_key(Modifiers::CTRL, Key::Enter);
+        let command =
+            cfg!(target_os = "macos") && input.consume_key(Modifiers::MAC_CMD, Key::Enter);
+        control || command
+    })
+}
+
 fn input_area(
     ui: &mut Ui,
     state: &mut ChatState,
@@ -2717,17 +2726,8 @@ fn input_area(
             .clamp(row_height, COMPOSER_MAX_HEIGHT);
         ui.horizontal(|ui| {
             ui.set_min_height(box_height);
-            // Keep Enter as the quick-submit shortcut while allowing the
-            // multiline editor to wrap and Shift+Enter to insert a newline.
-            // `consume_key` matches modifiers with `Modifiers::matches_logically`,
-            // which ignores an *extra* Shift/Alt — so `consume_key(NONE, Enter)`
-            // alone would also fire (and steal the keypress) on Shift+Enter.
-            // Guard on the held modifiers first so Shift+Enter is left for the
-            // `TextEdit`'s own `return_key` handling below to insert a newline.
-            let shift_held = ui.input(|i| i.modifiers.shift);
-            let enter = focused
-                && !shift_held
-                && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+            // Consume send shortcuts before TextEdit can insert a newline.
+            let enter = focused && consume_send_shortcut(ui);
             // Capped so a long pasted intent scrolls inside the box instead
             // of growing the composer (and pushing Send off-screen). The
             // width is reserved up front so Send still fits on this row.
@@ -2744,7 +2744,7 @@ fn input_area(
                             .frame(false)
                             .desired_rows(1)
                             .desired_width(edit_width)
-                            .return_key(egui::KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                            .return_key(egui::KeyboardShortcut::new(Modifiers::NONE, Key::Enter))
                             .id(input_id),
                     )
                 })
@@ -2761,25 +2761,13 @@ fn input_area(
             let send = widgets::primary_button(ui, "Send").clicked();
 
             if enter || send {
-                // Enter applies the palette selection when the user steered
-                // to it (↑/↓) or a command name is still partial; otherwise
-                // it submits. Tab/click always apply.
-                let completing = palette.get(state.palette_index).is_some_and(|row| {
-                    let differs = row.insert.trim() != state.input.trim();
-                    differs && (state.palette_navigated || row.enter_completes)
-                });
-                if completing {
-                    state.input = palette[state.palette_index].insert.clone();
-                    state.palette_navigated = false;
-                } else {
-                    submitted = true;
-                }
+                submitted = true;
                 state.focus_input = true;
             }
         });
     });
     ui.label(
-        RichText::new("Enter to send · Shift+Enter for a new line · Tab or click to complete")
+        RichText::new("Cmd/Ctrl+Enter to send · Enter for a new line · Tab or click to complete")
             .size(theme::FONT_SMALL)
             .color(theme::text_faint()),
     );
@@ -2862,9 +2850,6 @@ struct PaletteRow {
     insert: String,
     title: String,
     detail: String,
-    /// Command-name rows complete on Enter; argument rows only on Tab/click,
-    /// so Enter still submits an already-typed argument.
-    enter_completes: bool,
 }
 
 fn build_palette(
@@ -2896,7 +2881,6 @@ fn command_rows(prefix: &str, has_attached_plan: bool) -> Vec<PaletteRow> {
             insert: format!("{} ", spec.name),
             title: spec.usage.to_owned(),
             detail: spec.description.to_owned(),
-            enter_completes: true,
         })
         .collect()
 }
@@ -2914,7 +2898,6 @@ fn argument_rows(command: &str, arg: &str, sources: &SuggestionSources) -> Vec<P
                 insert: format!("{command} {} ", p.id),
                 title: format!("{} v{}", p.name, p.version),
                 detail: format!("{} · {}", when(&p.updated_at), plan_card::short_id(&p.id)),
-                enter_completes: false,
             })
             .collect(),
         "/inspect" | "/repair" => sources
@@ -2925,7 +2908,6 @@ fn argument_rows(command: &str, arg: &str, sources: &SuggestionSources) -> Vec<P
                 insert: format!("{command} {} ", r.id),
                 title: format!("{} · {}", r.plan_name, run_status_word(&r.status)),
                 detail: format!("{} · {}", when(&r.started_at), plan_card::short_id(&r.id)),
-                enter_completes: false,
             })
             .collect(),
         "/apply" | "/reject" => sources
@@ -2936,7 +2918,6 @@ fn argument_rows(command: &str, arg: &str, sources: &SuggestionSources) -> Vec<P
                 insert: format!("{command} {} ", p.id),
                 title: format!("{} · step {}", p.plan_name, p.failing_step_id),
                 detail: format!("{} · {}", when(&p.proposed_at), plan_card::short_id(&p.id)),
-                enter_completes: false,
             })
             .collect(),
         _ => Vec::new(),
@@ -3813,5 +3794,98 @@ mod tests {
             .insert("summary".to_owned(), serde_json::json!("should not show"));
         let summary = run_summary_text(&run);
         assert!(!summary.contains("Final result"), "got: {summary}");
+    }
+}
+
+#[cfg(test)]
+mod composer_shortcut_tests {
+    use super::*;
+    fn frame(
+        ctx: &egui::Context,
+        text: &mut String,
+        events: Vec<egui::Event>,
+        modifiers: Modifiers,
+    ) -> bool {
+        let mut sent = false;
+        let _ = ctx.run(
+            egui::RawInput {
+                events,
+                modifiers,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    sent = consume_send_shortcut(ui);
+                    ui.add(
+                        egui::TextEdit::multiline(text)
+                            .id(Id::new("shortcut_fixture"))
+                            .return_key(egui::KeyboardShortcut::new(Modifiers::NONE, Key::Enter)),
+                    );
+                });
+            },
+        );
+        sent
+    }
+    fn press(modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        }
+    }
+    #[test]
+    fn plain_and_shift_enter_insert_lines_control_enter_is_consumed() {
+        let ctx = egui::Context::default();
+        let mut text = "first".to_owned();
+        ctx.memory_mut(|memory| memory.request_focus(Id::new("shortcut_fixture")));
+        frame(&ctx, &mut text, vec![], Modifiers::NONE);
+        assert!(!frame(
+            &ctx,
+            &mut text,
+            vec![press(Modifiers::NONE)],
+            Modifiers::NONE
+        ));
+        assert!(text.contains('\n'));
+        let lines = text.matches('\n').count();
+        assert!(!frame(
+            &ctx,
+            &mut text,
+            vec![press(Modifiers::SHIFT)],
+            Modifiers::SHIFT
+        ));
+        assert_eq!(text.matches('\n').count(), lines + 1);
+        let before = text.clone();
+        assert!(frame(
+            &ctx,
+            &mut text,
+            vec![press(Modifiers::CTRL)],
+            Modifiers::CTRL
+        ));
+        assert_eq!(text, before);
+        if cfg!(target_os = "macos") {
+            assert!(frame(
+                &ctx,
+                &mut text,
+                vec![press(Modifiers::MAC_CMD)],
+                Modifiers::MAC_CMD
+            ));
+            assert_eq!(text, before);
+        }
+    }
+    #[test]
+    fn multiline_paste_is_preserved() {
+        let ctx = egui::Context::default();
+        let mut text = String::new();
+        ctx.memory_mut(|memory| memory.request_focus(Id::new("shortcut_fixture")));
+        frame(&ctx, &mut text, vec![], Modifiers::NONE);
+        assert!(!frame(
+            &ctx,
+            &mut text,
+            vec![egui::Event::Paste("first\nsecond".to_owned())],
+            Modifiers::NONE
+        ));
+        assert_eq!(text, "first\nsecond");
     }
 }

@@ -4,6 +4,15 @@ Use a plan's chat to edit the plan, supply inputs, run it, and handle repair or 
 
 Each chat is a conversation owned by at most one plan. A new chat starts without a plan: describe a workflow in plain language or use `/compile` to create one. After a plan is created, that conversation becomes its plan chat; opening the plan or one of its runs returns to the same conversation. Start a new chat when you want to create a separate plan.
 
+## Write and send a message
+
+Enter and Shift+Enter insert newlines in the main chat composer. Send with
+Cmd+Enter on macOS, Ctrl+Enter on any platform, or the **Send** button. Pasted
+multiline text stays intact. Whitespace-only messages are ignored.
+
+Use Tab or click a suggestion to complete a command. Sending submits the text
+currently in the composer, including a partially typed command.
+
 ## Compile or edit a plan
 
 In a new chat, enter plain-language intent or use `/compile <intent>`. In a chat that owns a plan, use `/edit <change>` to request an LLM-assisted edit. Review proposed edits before applying them.
