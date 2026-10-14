@@ -40,6 +40,16 @@ Resize its right-side panel or choose **Expand** to fill the content area. Use
 **Copy** for the complete content, toggle line wrapping, and **Close** to return.
 Valid JSON is formatted and highlighted; other output appears as plain text.
 
+## Read documentation offline
+
+Open **Documentation** from navigation in either the normal or agent interface.
+The installed binary includes these documentation pages, so browsing and
+case-insensitive full-text search work offline. Search results include snippets;
+select a result to open its page. Internal links stay in the app, **Back** returns
+to the previous page, and **Open online** opens the corresponding website page.
+Mermaid diagrams appear as readable source with a link to the online rendering.
+Bundled documentation follows the installed version.
+
 ## Find plans and runs
 
 `/plans` lists stored plans. `/show <plan>` opens a plan by name or ID prefix, and `/runs` lists recent runs. The complete command syntax is in the [chat command reference](../reference/chat-commands.md).

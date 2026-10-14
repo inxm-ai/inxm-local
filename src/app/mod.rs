@@ -15,6 +15,7 @@ pub mod commands;
 pub mod console;
 mod debug_shot;
 mod demo;
+pub mod documentation;
 pub mod engine;
 mod inspector;
 pub mod mcp_server;
@@ -194,6 +195,7 @@ enum View {
     Schedules,
     Mcp,
     Settings,
+    Documentation,
 }
 
 /// A single entry in the navigation back-stack: which view, and — for
@@ -265,7 +267,11 @@ fn agent_mode_enabled() -> bool {
 /// Schedules (both chat-centric surfaces) are unreachable, and `navigate`
 /// enforces this for every code path, not just the nav items that render.
 fn view_available(view: View, agent_mode: bool) -> bool {
-    !agent_mode || matches!(view, View::Plans | View::Runs | View::Mcp | View::Settings)
+    !agent_mode
+        || matches!(
+            view,
+            View::Plans | View::Runs | View::Mcp | View::Settings | View::Documentation
+        )
 }
 
 /// Whether this launch should show the first-run setup assistant.
@@ -297,7 +303,7 @@ fn view_time_bucket(view: View) -> crate::telemetry::usage::ViewKind {
         View::Plans | View::Runs => ViewKind::Plans,
         View::Schedules => ViewKind::Schedules,
         View::Mcp => ViewKind::McpTools,
-        View::Settings => ViewKind::Settings,
+        View::Settings | View::Documentation => ViewKind::Settings,
     }
 }
 
@@ -308,6 +314,7 @@ const NAV_ITEMS: &[(View, Icon, &str)] = &[
     (View::Schedules, Icon::Schedules, "Schedules"),
     (View::Mcp, Icon::Tools, "MCP Tools"),
     (View::Settings, Icon::Settings, "Settings"),
+    (View::Documentation, Icon::Plans, "Documentation"),
 ];
 
 pub struct InxmApp {
@@ -339,6 +346,7 @@ pub struct InxmApp {
     schedules_view: SchedulesState,
     mcp: McpState,
     settings: SettingsState,
+    documentation: documentation::DocumentationState,
     mcp_status: mcp_server::ServerStatus,
     mcp_status_rx: std::sync::mpsc::Receiver<mcp_server::ServerStatus>,
     tools: Vec<crate::tools::catalog::ToolEntry>,
@@ -536,6 +544,7 @@ impl InxmApp {
             runs_view: RunsState::default(),
             schedules_view: SchedulesState::default(),
             mcp: McpState::default(),
+            documentation: documentation::DocumentationState::default(),
             settings: SettingsState {
                 executable_dir_error: None,
                 draft: settings.clone(),
@@ -2542,6 +2551,7 @@ impl eframe::App for InxmApp {
                                 );
                             }
                             View::Mcp => mcp::show(ui, &mut self.mcp, &self.tools, &self.engine),
+                            View::Documentation => documentation::show(ui, &mut self.documentation),
                             View::Settings => {
                                 let action = settings::show(
                                     ui,
@@ -2867,8 +2877,14 @@ mod shell_tests {
     }
 
     #[test]
-    fn agent_mode_exposes_only_plans_runs_mcp_and_settings() {
-        for view in [View::Plans, View::Runs, View::Mcp, View::Settings] {
+    fn agent_mode_exposes_plans_runs_mcp_settings_and_documentation() {
+        for view in [
+            View::Plans,
+            View::Runs,
+            View::Mcp,
+            View::Settings,
+            View::Documentation,
+        ] {
             assert!(view_available(view, true), "view {view:?}");
         }
         for view in [View::Chat, View::Schedules] {
@@ -2885,6 +2901,7 @@ mod shell_tests {
             View::Schedules,
             View::Mcp,
             View::Settings,
+            View::Documentation,
         ] {
             assert!(view_available(view, false), "view {view:?}");
         }
