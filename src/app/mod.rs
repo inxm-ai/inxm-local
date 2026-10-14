@@ -537,6 +537,7 @@ impl InxmApp {
             schedules_view: SchedulesState::default(),
             mcp: McpState::default(),
             settings: SettingsState {
+                executable_dir_error: None,
                 draft: settings.clone(),
                 codex_sandbox_test: None,
                 update_check: None,

@@ -64,7 +64,12 @@ async fn execute(
     timeout_secs: Option<u64>,
 ) -> Result<std::process::Output, ToolError> {
     // PATH/PATHEXT-aware resolution: finds `.cmd`/`.exe` shims on Windows.
-    let mut cmd = Command::new(crate::hostenv::resolve_program(&config.command));
+    let mut cmd = Command::new(crate::tools::adapters::process::resolve_command(
+        &config.command,
+        &config.env,
+        config.working_dir.as_deref().map(std::path::Path::new),
+        &config.command,
+    )?);
 
     // Fixed prefix args from the tool definition.
     cmd.args(&config.args);
@@ -343,6 +348,28 @@ mod tests {
     #[cfg(unix)]
     const DELAYED_SIDE_EFFECT_SCRIPT: &str =
         "echo $$ > \"$PID_PATH\"; (sleep 2; printf late > \"$MARKER_PATH\") & wait";
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_path_resolves_launcher_relative_to_child_directory() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("override-launcher");
+        std::fs::write(&executable, "#!/bin/sh\nprintf override-selected").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = SubprocessConfig {
+            command: "override-launcher".to_owned(),
+            args: Vec::new(),
+            env: [("PATH".to_owned(), "bin".to_owned())]
+                .into_iter()
+                .collect(),
+            working_dir: Some(temp.path().to_string_lossy().into_owned()),
+        };
+        let output = run(&config, &IndexMap::new(), Some(5)).await.unwrap();
+        assert_eq!(output.stdout, "override-selected");
+    }
 
     #[test]
     fn arg_env_key_uppercases_key() {

@@ -94,6 +94,7 @@ pub enum SettingsAction {
 #[derive(Default)]
 pub struct SettingsState {
     pub draft: AppSettings,
+    pub executable_dir_error: Option<String>,
     /// Result of the last "Test sandbox" probe, if one has been run this session.
     pub codex_sandbox_test: Option<Result<(), String>>,
     /// Progress/result of the latest manual update check.
@@ -601,6 +602,7 @@ pub fn show(
             ui.add_space(12.0);
             theme::card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                executable_folders(ui, state, engine);
                 widgets::section_label(ui, "Environment");
                 ui.add_space(2.0);
                 widgets::wrapped_label(
@@ -831,4 +833,83 @@ pub fn show(
             ui.add_space(12.0);
         });
     action
+}
+
+fn executable_folders(ui: &mut Ui, state: &mut SettingsState, engine: &EngineHandle) {
+    widgets::section_label(ui, "Extra executable folders");
+    widgets::wrapped_label(ui, RichText::new("Folders are searched in this order before your inherited PATH. Fully quit and reopen INXM Local after changes; closing to the tray does not restart it.").color(theme::text_muted()));
+    let mut change = None;
+    for (index, folder) in state.draft.extra_executable_dirs.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(folder);
+            if !std::path::Path::new(folder).is_dir() {
+                ui.label(RichText::new("Missing directory").color(theme::warn()));
+            }
+            if ui.add_enabled(index > 0, egui::Button::new("↑")).clicked() {
+                change = Some((index, Some(index - 1)));
+            }
+            if ui
+                .add_enabled(
+                    index + 1 < state.draft.extra_executable_dirs.len(),
+                    egui::Button::new("↓"),
+                )
+                .clicked()
+            {
+                change = Some((index, Some(index + 1)));
+            }
+            if widgets::ghost_button(ui, "Remove").clicked() {
+                change = Some((index, None));
+            }
+        });
+    }
+    let mut changed = false;
+    if let Some((index, destination)) = change {
+        match destination {
+            Some(destination) => state.draft.extra_executable_dirs.swap(index, destination),
+            None => {
+                state.draft.extra_executable_dirs.remove(index);
+            }
+        }
+        changed = true;
+    }
+    if widgets::ghost_button(ui, "Add folder…").clicked()
+        && let Some(folder) = rfd::FileDialog::new().pick_folder()
+    {
+        match folder
+            .to_str()
+            .ok_or_else(|| "The folder cannot be represented in settings".to_owned())
+            .and_then(|folder| {
+                crate::hostenv::validate_executable_dir(folder).map(|_| folder.to_owned())
+            }) {
+            Ok(folder) => {
+                if !state.draft.extra_executable_dirs.contains(&folder) {
+                    state.draft.extra_executable_dirs.push(folder);
+                    changed = true;
+                }
+                state.executable_dir_error = None;
+            }
+            Err(error) => state.executable_dir_error = Some(error),
+        }
+    }
+    if changed {
+        engine.send(EngineCommand::SaveSettings {
+            settings: Box::new(state.draft.clone()),
+        });
+    }
+    if let Some(error) = &state.executable_dir_error {
+        ui.label(RichText::new(error).color(theme::err()));
+    }
+    ui.label("Effective PATH for this process");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = path.to_string_lossy();
+    ui.add(
+        egui::TextEdit::multiline(&mut path.as_ref())
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY),
+    );
+    let gh = crate::hostenv::find_on_path("gh")
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "Not found — add its containing folder above and restart".to_owned());
+    ui.label(format!("gh: {gh}"));
+    ui.separator();
 }

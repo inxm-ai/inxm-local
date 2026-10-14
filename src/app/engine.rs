@@ -376,6 +376,9 @@ pub struct AppSettings {
     pub api_base: String,
     #[serde(default)]
     pub executable: String,
+    /// Ordered executable folders prepended to PATH on the next full launch.
+    #[serde(default)]
+    pub extra_executable_dirs: Vec<String>,
     /// Full command line for [`BackendChoice::CustomCli`], e.g.
     /// `opencode run --print "{{PROMPT}}"`. Empty pipes the prompt to stdin
     /// instead — see `crate::llm::CUSTOM_CLI_PROMPT_PLACEHOLDER`.
@@ -474,6 +477,7 @@ impl Default for AppSettings {
             api_key: String::new(),
             api_base: String::new(),
             executable: String::new(),
+            extra_executable_dirs: Vec::new(),
             command_template: String::new(),
             custom_cli_agentic: false,
             experimental_agent_calls: false,
@@ -7287,5 +7291,22 @@ tools:
         );
         assert_eq!(slugify_tool_name("!!! ??? "), "new-tool");
         assert_eq!(slugify_tool_name(""), "new-tool");
+    }
+}
+
+#[cfg(test)]
+mod executable_settings_tests {
+    use super::*;
+    #[test]
+    fn legacy_settings_default_folders_and_roundtrip_preserves_order() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.extra_executable_dirs.is_empty());
+        let settings = AppSettings {
+            extra_executable_dirs: vec!["/one with spaces".to_owned(), "/two".to_owned()],
+            ..settings
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(loaded.extra_executable_dirs, settings.extra_executable_dirs);
     }
 }

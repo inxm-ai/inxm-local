@@ -71,6 +71,7 @@ fn main() -> eframe::Result<()> {
     // running the user's shell profile, and before `run_native` starts any
     // thread, because the import writes the process environment.
     inxm_local::hostenv::import_login_shell_env();
+    configure_executable_environment(&engine::AppSettings::load(&paths.settings_path));
 
     // `--start-hidden` is what login/startup entries pass: create the window
     // invisible so the app comes up in the system tray only — the same state
@@ -117,6 +118,21 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+/// Environment mutation belongs before workers and the cached environment probe.
+fn configure_executable_environment(settings: &engine::AppSettings) {
+    match inxm_local::hostenv::configure_executable_dirs(&settings.extra_executable_dirs) {
+        Ok(warnings) => {
+            for warning in warnings {
+                tracing::warn!(operation = "hostenv.extra_executable_dirs", %warning);
+            }
+        }
+        Err(error) => {
+            tracing::warn!(operation = "hostenv.extra_executable_dirs", %error,
+                "configured executable folders were not applied");
+        }
+    }
+}
+
 /// Wayland does not allow winit to hide or restore a top-level window. Prefer
 /// X11 through XWayland when it is available so close-to-tray can both remove
 /// the window from the dock and restore it from the tray menu.
@@ -145,6 +161,7 @@ fn run_headless() {
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
+    configure_executable_environment(&settings);
     // Opt-in only; a no-op unless the user enabled it (docs/reference/telemetry.md).
     inxm_local::telemetry::record_app_started(
         settings.telemetry_enabled,
@@ -211,6 +228,7 @@ fn run_mcp_only() {
 
     let paths = engine::DataPaths::resolve();
     let settings = engine::AppSettings::load(&paths.settings_path);
+    configure_executable_environment(&settings);
     // Opt-in only; a no-op unless the user enabled it (docs/reference/telemetry.md).
     inxm_local::telemetry::record_app_started(
         settings.telemetry_enabled,

@@ -10,6 +10,11 @@ publish = false
 name = "inxm-local"
 path = "src/main.rs"
 
+[[test]]
+name = "integration_executable_discovery"
+path = "tests/integration_executable_discovery.rs"
+harness = false
+
 [dependencies]
 # Desktop UI — pure-Rust immediate-mode GUI (no system webview required)
 eframe = "0.32"
