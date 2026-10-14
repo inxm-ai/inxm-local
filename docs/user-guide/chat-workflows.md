@@ -35,6 +35,11 @@ When a plan reaches a `HUMAN_INTERACTION` step, the plan card pauses and display
 
 Use `/inspect [run-id]` for step details. For a failed run, `/repair [run-id]` asks the compiler to propose a patch or identify an external problem. Apply or reject a proposed patch with `/apply <patch-id>` or `/reject <patch-id> [reason]`. After applying a patch, `/resume <run-id>` reruns the failed step and its downstream steps against the new plan version. For an external problem, fix it first, then use `/resume <run-id>` with the same plan version.
 
+Open plan JSON, run JSON, or structured step details in the read-only inspector.
+Resize its right-side panel or choose **Expand** to fill the content area. Use
+**Copy** for the complete content, toggle line wrapping, and **Close** to return.
+Valid JSON is formatted and highlighted; other output appears as plain text.
+
 ## Find plans and runs
 
 `/plans` lists stored plans. `/show <plan>` opens a plan by name or ID prefix, and `/runs` lists recent runs. The complete command syntax is in the [chat command reference](../reference/chat-commands.md).

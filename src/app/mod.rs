@@ -16,6 +16,7 @@ pub mod console;
 mod debug_shot;
 mod demo;
 pub mod engine;
+mod inspector;
 pub mod mcp_server;
 pub mod mutation;
 pub mod schedule_store;
@@ -2324,10 +2325,15 @@ impl eframe::App for InxmApp {
             );
         }
 
+        let inspector_open = inspector::is_open(ctx);
+        if inspector::show(ctx) {
+            return;
+        }
+
         // The plan/design workspace is a full-height sidebar docked to the
         // window edge, so it renders at ctx level before the
         // central panel instead of inside the chat view's margin frame.
-        if self.view == View::Chat && !self.onboarding_active {
+        if self.view == View::Chat && !self.onboarding_active && !inspector_open {
             let chat_engine = self.engine.scoped(self.session_id.clone());
             let sources = chat::SuggestionSources {
                 plans: &self.plans.plans,
@@ -2438,6 +2444,27 @@ impl eframe::App for InxmApp {
                                         self.schedules_view.start_for_plan(&plan_id);
                                         self.navigate(View::Schedules, None);
                                     }
+                                    Some(PlansAction::InspectJson(plan_id)) => {
+                                        let result =
+                                            crate::storage::StorageRoot::open(&self.paths.data_dir)
+                                                .and_then(|storage| {
+                                                    storage.plans().load_current(&plan_id)
+                                                });
+                                        let (title, json) = match result {
+                                            Ok(plan) => (
+                                                format!(
+                                                    "Plan {} · v{}",
+                                                    plan.metadata.id, plan.metadata.version
+                                                ),
+                                                crate::plan::to_json(&plan)
+                                                    .unwrap_or_else(|error| error.to_string()),
+                                            ),
+                                            Err(error) => {
+                                                (format!("Plan {plan_id}"), error.to_string())
+                                            }
+                                        };
+                                        inspector::open(ctx, title, &json);
+                                    }
                                     Some(PlansAction::ViewAllRuns) => {
                                         // `navigate` records the origin, so
                                         // Back returns to this overview.
@@ -2477,6 +2504,25 @@ impl eframe::App for InxmApp {
                                     {
                                         self.engine
                                             .send(EngineCommand::InspectRunReadOnly { run_id });
+                                    }
+                                    Some(RunsAction::InspectJson(run_id)) => {
+                                        let result =
+                                            crate::storage::StorageRoot::open(&self.paths.data_dir)
+                                                .and_then(|storage| storage.runs().load(&run_id));
+                                        let (title, json) = match result {
+                                            Ok(run) => (
+                                                format!(
+                                                    "Run {} · plan {} v{}",
+                                                    run.id, run.plan_id, run.plan_version
+                                                ),
+                                                serde_json::to_string(&run)
+                                                    .unwrap_or_else(|error| error.to_string()),
+                                            ),
+                                            Err(error) => {
+                                                (format!("Run {run_id}"), error.to_string())
+                                            }
+                                        };
+                                        inspector::open(ctx, title, &json);
                                     }
                                     Some(RunsAction::Abort { run_id }) => {
                                         self.engine.send(EngineCommand::AbortRun { run_id });

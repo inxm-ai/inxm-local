@@ -51,13 +51,21 @@ pub struct RunsState {
 pub enum RunsAction {
     /// Open the run inside its plan's chat (same semantics as the Plans
     /// view's Inspect / `PlansAction::OpenRun`).
-    Inspect { plan_id: String, run_id: String },
+    Inspect {
+        plan_id: String,
+        run_id: String,
+    },
     /// Navigate to the plan's conversation (click on the plan name).
     OpenPlan(String),
+    InspectJson(String),
     /// Inspect a stored run in place when Chat is unavailable.
-    InspectReadOnly { run_id: String },
+    InspectReadOnly {
+        run_id: String,
+    },
     /// Abort an in-progress run.
-    Abort { run_id: String },
+    Abort {
+        run_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -337,6 +345,9 @@ fn run_row(
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::ghost_button(ui, "JSON").clicked() {
+                    action = Some(RunsAction::InspectJson(run.id.clone()));
+                }
                 if widgets::ghost_button(ui, "Inspect").clicked() {
                     action = Some(match agent_mode {
                         true => RunsAction::InspectReadOnly {
@@ -417,6 +428,14 @@ fn read_only_inspector(ui: &mut Ui, run: &crate::executor::Run) {
         ui.set_width(ui.available_width());
         ui.horizontal(|ui| {
             widgets::section_label(ui, "Run inspection");
+            if widgets::ghost_button(ui, "JSON").clicked() {
+                let json = serde_json::to_string(run).unwrap_or_else(|e| e.to_string());
+                super::super::inspector::open(
+                    ui.ctx(),
+                    format!("Run {} · plan {}", run.id, run.plan_id),
+                    &json,
+                );
+            }
             ui.label(
                 RichText::new(plan_card::short_id(&run.id))
                     .monospace()
