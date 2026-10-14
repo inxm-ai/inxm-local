@@ -1885,6 +1885,24 @@ pub(crate) fn create_configured_backend(
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
 async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Result<()> {
+    let kind = EngineCommandTrace::from_command(&command).command_kind;
+    let readonly = kind.starts_with("list_")
+        || matches!(
+            kind,
+            "bootstrap"
+                | "check_for_updates"
+                | "abort_run"
+                | "inspect_run"
+                | "inspect_run_read_only"
+                | "show_plan"
+                | "export_plan"
+                | "save_settings"
+        );
+    let _work = if readonly {
+        None
+    } else {
+        Some(super::update_gate::admit(&env.paths.data_dir).map_err(anyhow::Error::msg)?)
+    };
     match command {
         EngineCommand::Bootstrap => bootstrap(env),
         EngineCommand::Compile { intent } => compile(env, intent).await,
@@ -2656,6 +2674,10 @@ async fn scheduler_loop(env: EngineEnv) {
         tokio::time::sleep(SCHEDULER_TICK).await;
         let now = chrono::Local::now();
 
+        let Ok(work_guard) = super::update_gate::admit(&env.paths.data_dir) else {
+            continue;
+        };
+        let work_guard = Arc::new(work_guard);
         let schedules_paused = AppSettings::load(&env.paths.settings_path).schedules_paused;
         let active_ids = match active.lock() {
             Ok(guard) => guard.clone(),
@@ -2763,7 +2785,9 @@ async fn scheduler_loop(env: EngineEnv) {
                 "scheduled occurrence dispatched"
             );
             let active = active.clone();
+            let work_guard = work_guard.clone();
             tokio::spawn(async move {
+                let _work_guard = work_guard;
                 let started = std::time::Instant::now();
                 let result = run_plan_with_timeout(
                     &scheduled_env,
@@ -5025,6 +5049,11 @@ async fn check_for_updates(env: &EngineEnv, manual: bool) {
             .await?
             .error_for_status()?;
         let body: serde_json::Value = response.json().await?;
+        if body.get("draft").and_then(|v| v.as_bool()) == Some(true)
+            || body.get("prerelease").and_then(|v| v.as_bool()) == Some(true)
+        {
+            anyhow::bail!("Only stable published releases may be installed");
+        }
         let tag = body
             .get("tag_name")
             .and_then(|v| v.as_str())
@@ -5103,7 +5132,6 @@ fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> b
 /// Whether `latest` (e.g. `"v0.2.0"`) is a newer semver than `current` (e.g.
 /// `"0.1.0"`). Unparsable input on either side is treated as "not newer" so a
 /// malformed tag can never falsely trigger the update badge.
-#[cfg(test)]
 pub(crate) fn is_newer_version(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(latest), Some(current)) => latest > current,

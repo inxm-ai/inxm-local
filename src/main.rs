@@ -15,7 +15,87 @@ const APP_TITLE: &str = "INXM // Local";
 const INITIAL_WINDOW_SIZE: [f32; 2] = [1180.0, 780.0];
 const MIN_WINDOW_SIZE: [f32; 2] = [860.0, 560.0];
 
+const RESTART_WAIT_PID: &str = "INXM_RESTART_WAIT_PID";
+const RESTART_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const RESTART_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
+fn wait_for_restart_parent() -> Result<(), String> {
+    let Some(value) = std::env::var_os(RESTART_WAIT_PID) else {
+        return Ok(());
+    };
+    // This is the first startup operation; no worker can read the environment yet.
+    unsafe { std::env::remove_var(RESTART_WAIT_PID) };
+    let pid = value
+        .to_str()
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|pid| *pid > 0 && *pid != std::process::id())
+        .ok_or("Invalid restart parent process")?;
+    wait_for_process_exit(pid, RESTART_WAIT_TIMEOUT)
+}
+
+#[cfg(unix)]
+fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> Result<(), String> {
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    const PROCESS_NOT_FOUND: i32 = 3;
+    let pid = i32::try_from(pid).map_err(|_| "Invalid restart parent process")?;
+    let started = std::time::Instant::now();
+    loop {
+        // Signal zero only queries process existence; no signal is delivered.
+        if unsafe { kill(pid, 0) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(PROCESS_NOT_FOUND) {
+                return Ok(());
+            }
+            return Err(format!("Cannot inspect restart parent: {error}"));
+        }
+        if started.elapsed() >= timeout {
+            return Err("The previous instance has not exited; restart was cancelled".to_owned());
+        }
+        std::thread::sleep(RESTART_POLL_INTERVAL);
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_process_exit(pid: u32, timeout: std::time::Duration) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INVALID_PARAMETER, GetLastError, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    };
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+    let handle = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+    if handle.is_null() {
+        let error = unsafe { GetLastError() };
+        if error == ERROR_INVALID_PARAMETER {
+            return Ok(());
+        }
+        return Err(format!(
+            "Cannot inspect restart parent: Windows error {error}"
+        ));
+    }
+    let milliseconds =
+        u32::try_from(timeout.as_millis()).map_err(|_| "Restart wait timeout is too large")?;
+    let result = unsafe { WaitForSingleObject(handle, milliseconds) };
+    unsafe { CloseHandle(handle) };
+    match result {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => {
+            Err("The previous instance has not exited; restart was cancelled".to_owned())
+        }
+        _ => Err(format!(
+            "Cannot wait for restart parent: Windows error {}",
+            unsafe { GetLastError() }
+        )),
+    }
+}
+
 fn main() -> eframe::Result<()> {
+    if let Err(error) = wait_for_restart_parent() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
     if let Some(value) = std::env::args().find_map(|arg| {
         arg.strip_prefix("--set-telemetry=")
             .map(|value| value.to_owned())
@@ -501,4 +581,22 @@ async fn rpc_tool(
         serde_json::json!({ "name": name, "arguments": arguments }),
     )
     .await
+}
+
+#[cfg(test)]
+mod restart_tests {
+    #[cfg(unix)]
+    #[test]
+    fn restart_wait_refuses_live_parent_and_accepts_exited_process() {
+        assert!(
+            super::wait_for_process_exit(std::process::id(), std::time::Duration::ZERO).is_err()
+        );
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        assert!(super::wait_for_process_exit(pid, std::time::Duration::ZERO).is_ok());
+    }
 }

@@ -89,6 +89,7 @@ const CODEX_SANDBOX_MODE_CHOICES: &[(CodexSandboxMode, &str, &str)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
     RestartOnboarding,
+    Update(crate::app::update_controller::UpdateCommand),
 }
 
 #[derive(Default)]
@@ -143,6 +144,7 @@ pub fn show(
     mcp_status: &ServerStatus,
     engine: &EngineHandle,
     update_available: Option<&(String, String)>,
+    update: &crate::app::update_controller::UpdateController,
 ) -> Option<SettingsAction> {
     let mut action = None;
     widgets::scroll_area_vertical()
@@ -738,6 +740,7 @@ pub fn show(
                         .color(theme::text_muted()),
                 );
                 ui.hyperlink_to("Releases on GitHub", RELEASES_URL);
+                if let Some(command) = update_controls(ui, update, update_available.is_some()) { action = Some(SettingsAction::Update(command)); }
                 ui.add_space(8.0);
 
                 if ui
@@ -912,4 +915,80 @@ fn executable_folders(ui: &mut Ui, state: &mut SettingsState, engine: &EngineHan
         .unwrap_or_else(|| "Not found — add its containing folder above and restart".to_owned());
     ui.label(format!("gh: {gh}"));
     ui.separator();
+}
+
+fn update_controls(
+    ui: &mut Ui,
+    update: &crate::app::update_controller::UpdateController,
+    available: bool,
+) -> Option<crate::app::update_controller::UpdateCommand> {
+    use crate::app::{update_controller::UpdateCommand, updater::UpdateStatus};
+    let mut command = None;
+    match &update.status {
+        None if available => {
+            if widgets::primary_button(ui, "Download and install").clicked() {
+                command = Some(UpdateCommand::DownloadAndInstall);
+            }
+        }
+        Some(UpdateStatus::Downloading { bytes, total }) => {
+            ui.label(format!(
+                "Downloading {bytes} bytes{}",
+                total.map(|total| format!(" / {total}")).unwrap_or_default()
+            ));
+            if let Some(total) = total.filter(|total| *total > 0) {
+                ui.add(egui::ProgressBar::new(*bytes as f32 / total as f32));
+            }
+            if widgets::ghost_button(ui, "Cancel").clicked() {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Verifying) => {
+            ui.label("Verifying SHA-256…");
+            if widgets::ghost_button(ui, "Cancel").clicked() {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Ready { version }) => {
+            ui.label(format!("v{version} verified; preparing installation…"));
+        }
+        Some(UpdateStatus::Installing) => {
+            ui.label("Installing… New runs and compiler work are paused.");
+        }
+        Some(UpdateStatus::Installed { .. }) => {
+            ui.label(if update.installer_handoff {
+                "Installer is ready and will run after INXM exits, then reopen this launch mode. New work is paused."
+            } else {
+                "Update installed. New work stays paused until restart."
+            });
+            if widgets::primary_button(ui, "Restart now").clicked() {
+                command = Some(UpdateCommand::RestartNow);
+            }
+            if update.restart_later {
+                ui.label("Restart postponed. Fully quit when ready; new work remains paused.");
+            }
+            if !update.restart_later && widgets::ghost_button(ui, "Restart later").clicked() {
+                command = Some(UpdateCommand::RestartLater);
+            }
+        }
+        Some(UpdateStatus::Failed(error)) => {
+            widgets::wrapped_label(ui, RichText::new(error).color(theme::err()));
+            ui.hyperlink_to("Manual update", RELEASES_URL);
+            if widgets::ghost_button(ui, "Retry").clicked() {
+                command = Some(UpdateCommand::Retry);
+            }
+            if update.pending()
+                && widgets::ghost_button(ui, "Cancel update and resume work").clicked()
+            {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Cancelled) => {
+            ui.label("Update cancelled; installation unchanged.");
+            if widgets::ghost_button(ui, "Retry").clicked() {
+                command = Some(UpdateCommand::Retry);
+            }
+        }
+        _ => {}
+    }
+    command
 }

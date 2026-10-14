@@ -27,6 +27,9 @@ pub mod support;
 pub mod theme;
 pub mod time;
 mod tray;
+mod update_controller;
+pub mod update_gate;
+pub mod updater;
 pub mod views;
 pub mod widgets;
 
@@ -358,6 +361,7 @@ pub struct InxmApp {
     shot: debug_shot::ShotState,
     /// Set once a `CheckForUpdates` round-trip finds a newer GitHub release.
     update_available: Option<(String, String)>,
+    update_controller: update_controller::UpdateController,
     tray: Option<tray::TrayController>,
     /// Theme the tray icon currently shows; compared against `theme::is_dark`
     /// every frame so the icon follows theme changes from any source (the
@@ -564,6 +568,7 @@ impl InxmApp {
             environment: String::new(),
             shot: debug_shot::ShotState::from_env(),
             update_available: None,
+            update_controller: update_controller::UpdateController::default(),
             tray,
             tray_icon_dark: theme::is_dark(),
             quit_requested,
@@ -831,6 +836,57 @@ impl InxmApp {
     // ─── Chat sessions ────────────────────────────────────────────────────────
 
     /// Persist the conversation when it changed since the last save.
+    fn persist_update_drafts(&self) -> Result<(), String> {
+        chat_store::save(
+            &self.paths.data_dir,
+            &self.session_id,
+            self.session_created_at,
+            &self.chat,
+        )
+        .map_err(|e| format!("Could not save current draft: {e}"))?;
+        for (id, parked) in &self.parked_chats {
+            chat_store::save(&self.paths.data_dir, id, parked.created_at, &parked.chat)
+                .map_err(|e| format!("Could not save parked draft: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn handle_update_command(
+        &mut self,
+        command: update_controller::UpdateCommand,
+        ctx: &egui::Context,
+    ) {
+        use update_controller::UpdateCommand;
+        match command {
+            UpdateCommand::DownloadAndInstall => self.update_controller.begin(ctx),
+            UpdateCommand::Cancel => self.update_controller.cancel(),
+            UpdateCommand::Retry => self.update_controller.retry(ctx),
+            UpdateCommand::RestartLater => self.update_controller.restart_later = true,
+            UpdateCommand::RestartNow => {
+                if let Err(error) = self.persist_update_drafts() {
+                    self.update_controller.failure(error);
+                    return;
+                }
+                if self.update_controller.installer_handoff {
+                    self.quit_requested
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    let restart = std::env::current_exe().and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .args(std::env::args_os().skip(1))
+                            .env("INXM_RESTART_WAIT_PID", std::process::id().to_string())
+                            .spawn()
+                    });
+                    match restart {
+                        Ok(_) => { self.quit_requested.store(true, std::sync::atomic::Ordering::Relaxed); ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                        Err(error) => self.update_controller.failure(format!("Update installed, but restart failed: {error}. Fully quit and reopen the app.")),
+                    }
+                }
+            }
+        }
+    }
+
     fn autosave_chat(&mut self) {
         let fingerprint = chat_store::fingerprint(&self.chat);
         if fingerprint == self.last_saved_fingerprint {
@@ -2283,6 +2339,13 @@ impl eframe::App for InxmApp {
             self.refresh_plans_overview();
         }
         self.autosave_chat();
+        self.update_controller.poll();
+        if self.update_controller.ready_to_install() {
+            match self.persist_update_drafts() {
+                Ok(()) => self.update_controller.install(&self.paths.data_dir, ctx),
+                Err(error) => self.update_controller.failure(error),
+            }
+        }
 
         // Cross-view fade: restart the clock whenever the view changes.
         let now = ctx.input(|i| i.time);
@@ -2560,9 +2623,16 @@ impl eframe::App for InxmApp {
                                     &self.mcp_status,
                                     &self.engine,
                                     self.update_available.as_ref(),
+                                    &self.update_controller,
                                 );
-                                if action == Some(SettingsAction::RestartOnboarding) {
-                                    self.restart_onboarding();
+                                match action {
+                                    Some(SettingsAction::RestartOnboarding) => {
+                                        self.restart_onboarding()
+                                    }
+                                    Some(SettingsAction::Update(command)) => {
+                                        self.handle_update_command(command, ctx)
+                                    }
+                                    None => {}
                                 }
                             }
                         }
