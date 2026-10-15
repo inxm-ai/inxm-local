@@ -1843,7 +1843,13 @@ impl InxmApp {
         // Without this bound, a `bottom_up` footer and a growing chat list can
         // occupy the same vertical range and visually overlap.
         if !self.agent_mode {
-            let chats_max_h = (ui.available_height() - SIDEBAR_FOOTER_HEIGHT).max(0.0);
+            let footer_height = SIDEBAR_FOOTER_HEIGHT
+                + if self.update_available.is_some() {
+                    theme::GAP * 2.0
+                } else {
+                    0.0
+                };
+            let chats_max_h = (ui.available_height() - footer_height).max(0.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), chats_max_h), |ui| {
                 self.chats_section(ui);
             });
@@ -2039,6 +2045,10 @@ impl InxmApp {
                 }
             });
             if let Some((version, _)) = &self.update_available {
+                // This footer lays out bottom-up: the divider separates the
+                // connection status below from the update action above.
+                ui.add_space(theme::GAP);
+                ui.separator();
                 ui.add_space(theme::GAP);
                 ui.horizontal(|ui| {
                     ui.add_space(16.0);
@@ -2055,24 +2065,46 @@ impl InxmApp {
 fn update_available_chip(ui: &mut Ui, version: &str) -> bool {
     const CHIP_RADIUS: u8 = 255;
     const CHIP_PADDING: egui::Vec2 = egui::vec2(12.0, 8.0);
-    ui.scope(|ui| {
-        ui.spacing_mut().button_padding = CHIP_PADDING;
-        ui.add(
-            egui::Button::new(
-                RichText::new("Update available")
-                    .size(theme::FONT_BODY)
-                    .color(theme::text()),
-            )
-            .fill(theme::accent_dim())
-            .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
+    const CHIP_ICON_SIZE: f32 = 16.0;
+    const CHIP_LABEL: &str = "Update available";
+    let color = theme::text_muted();
+    let galley = ui.painter().layout_no_wrap(
+        CHIP_LABEL.to_owned(),
+        egui::FontId::proportional(theme::FONT_BODY),
+        color,
+    );
+    let size = galley.size() + CHIP_PADDING * 2.0 + vec2(CHIP_ICON_SIZE + theme::GAP, 0.0);
+    let response = ui.add(
+        egui::Button::new("")
+            .min_size(size)
+            .fill(theme::surface())
+            .stroke(theme::readonly_control_stroke())
             .corner_radius(CHIP_RADIUS),
-        )
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), CHIP_LABEL)
+    });
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            response.rect.left() + CHIP_PADDING.x + CHIP_ICON_SIZE / 2.0,
+            response.rect.center().y,
+        ),
+        vec2(CHIP_ICON_SIZE, CHIP_ICON_SIZE),
+    );
+    widgets::paint_icon(ui.painter(), icon_rect, Icon::Download, color);
+    ui.painter().galley(
+        egui::pos2(
+            icon_rect.right() + theme::GAP,
+            response.rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    response
         .on_hover_text(format!(
             "Version {version} is available. Review and install the update."
         ))
         .clicked()
-    })
-    .inner
 }
 
 /// Trailing indicator on a navigation row.
