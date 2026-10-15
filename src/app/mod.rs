@@ -1762,7 +1762,6 @@ impl InxmApp {
         ui.add_space(20.0);
 
         // fold (not filter+find): every item must render each frame, in order.
-        let update_available = self.update_available.is_some();
         let running_count = runs::count_running(&self.plans.runs);
         let on_chat = self.view == View::Chat;
         let (switch_to, selected_rect) = NAV_ITEMS
@@ -1773,7 +1772,6 @@ impl InxmApp {
                 |(clicked, selected_rect), (view, icon, label)| {
                     let selected = self.view == *view;
                     let badge = match view {
-                        View::Settings if update_available => NavBadge::Dot,
                         // Hidden entirely while nothing runs — the pill only
                         // exists to answer "is something running right now?".
                         View::Runs if running_count > 0 => NavBadge::Running(running_count),
@@ -2042,12 +2040,39 @@ impl InxmApp {
     }
 }
 
+/// Persistent update entry point, independent of the collapsible navigation.
+fn update_available_chip(ctx: &egui::Context, version: &str) -> bool {
+    const EDGE_INSET: f32 = 16.0;
+    const CHIP_RADIUS: u8 = 255;
+    const CHIP_PADDING: egui::Vec2 = egui::vec2(12.0, 8.0);
+    egui::Area::new(Id::new("update_available_chip"))
+        .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-EDGE_INSET, -EDGE_INSET))
+        .order(egui::Order::Foreground)
+        .movable(false)
+        .show(ctx, |ui| {
+            ui.spacing_mut().button_padding = CHIP_PADDING;
+            ui.add(
+                egui::Button::new(
+                    RichText::new("Update available")
+                        .size(theme::FONT_BODY)
+                        .color(theme::text()),
+                )
+                .fill(theme::accent_dim())
+                .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
+                .corner_radius(CHIP_RADIUS),
+            )
+            .on_hover_text(format!(
+                "Version {version} is available. Open Settings to review and install."
+            ))
+            .clicked()
+        })
+        .inner
+}
+
 /// Trailing indicator on a navigation row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NavBadge {
     None,
-    /// Unobtrusive dot — an update is available (Settings).
-    Dot,
     /// "N running" pill with a pulsing dot (Runs). Only constructed while
     /// N > 0; the badge disappears entirely when nothing is running.
     Running(usize),
@@ -2119,12 +2144,6 @@ fn nav_item(
         );
         match badge {
             NavBadge::None => {}
-            NavBadge::Dot => {
-                // Unobtrusive dot signaling an available update — deliberately
-                // not a pulsing/attention-grabbing indicator.
-                let dot_center = egui::pos2(rect.right() - 14.0, rect.top() + 10.0);
-                painter.circle_filled(dot_center, 3.5, theme::accent());
-            }
             NavBadge::Running(count) => {
                 // "N running" pill: pulsing amber dot + count, right-aligned.
                 // This one *is* attention-grabbing on purpose — it answers
@@ -2638,6 +2657,14 @@ impl eframe::App for InxmApp {
                         }
                     });
             });
+        if let Some((version, _)) = &self.update_available
+            && update_available_chip(ctx, version)
+        {
+            if self.onboarding_active {
+                self.dismiss_onboarding();
+            }
+            self.navigate(View::Settings, None);
+        }
         mcp::recovery_dialog(ctx, &mut self.mcp, &self.engine);
     }
 }
