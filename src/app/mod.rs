@@ -2038,37 +2038,41 @@ impl InxmApp {
                     }
                 }
             });
+            if let Some((version, _)) = &self.update_available {
+                ui.add_space(theme::GAP);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    if update_available_chip(ui, version) {
+                        self.update_dialog_open = true;
+                    }
+                });
+            }
         });
     }
 }
 
-/// Persistent update entry point, independent of the collapsible navigation.
-fn update_available_chip(ctx: &egui::Context, version: &str) -> bool {
-    const EDGE_INSET: f32 = 16.0;
+/// Update entry point above the sidebar connection indicators.
+fn update_available_chip(ui: &mut Ui, version: &str) -> bool {
     const CHIP_RADIUS: u8 = 255;
     const CHIP_PADDING: egui::Vec2 = egui::vec2(12.0, 8.0);
-    egui::Area::new(Id::new("update_available_chip"))
-        .anchor(egui::Align2::RIGHT_BOTTOM, vec2(-EDGE_INSET, -EDGE_INSET))
-        .order(egui::Order::Foreground)
-        .movable(false)
-        .show(ctx, |ui| {
-            ui.spacing_mut().button_padding = CHIP_PADDING;
-            ui.add(
-                egui::Button::new(
-                    RichText::new("Update available")
-                        .size(theme::FONT_BODY)
-                        .color(theme::text()),
-                )
-                .fill(theme::accent_dim())
-                .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
-                .corner_radius(CHIP_RADIUS),
+    ui.scope(|ui| {
+        ui.spacing_mut().button_padding = CHIP_PADDING;
+        ui.add(
+            egui::Button::new(
+                RichText::new("Update available")
+                    .size(theme::FONT_BODY)
+                    .color(theme::text()),
             )
-            .on_hover_text(format!(
-                "Version {version} is available. Review and install the update."
-            ))
-            .clicked()
-        })
-        .inner
+            .fill(theme::accent_dim())
+            .stroke(egui::Stroke::new(1.0_f32, theme::accent()))
+            .corner_radius(CHIP_RADIUS),
+        )
+        .on_hover_text(format!(
+            "Version {version} is available. Review and install the update."
+        ))
+        .clicked()
+    })
+    .inner
 }
 
 /// Trailing indicator on a navigation row.
@@ -2659,11 +2663,6 @@ impl eframe::App for InxmApp {
                         }
                     });
             });
-        if let Some((version, _)) = &self.update_available
-            && update_available_chip(ctx, version)
-        {
-            self.update_dialog_open = true;
-        }
         mcp::recovery_dialog(ctx, &mut self.mcp, &self.engine);
         if let Some(command) = settings::update_dialog(
             ctx,
