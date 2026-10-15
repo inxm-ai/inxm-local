@@ -362,6 +362,7 @@ pub struct InxmApp {
     /// Set once a `CheckForUpdates` round-trip finds a newer GitHub release.
     update_available: Option<(String, String)>,
     update_controller: update_controller::UpdateController,
+    update_dialog_open: bool,
     tray: Option<tray::TrayController>,
     /// Theme the tray icon currently shows; compared against `theme::is_dark`
     /// every frame so the icon follows theme changes from any source (the
@@ -569,6 +570,7 @@ impl InxmApp {
             shot: debug_shot::ShotState::from_env(),
             update_available: None,
             update_controller: update_controller::UpdateController::default(),
+            update_dialog_open: false,
             tray,
             tray_icon_dark: theme::is_dark(),
             quit_requested,
@@ -2062,7 +2064,7 @@ fn update_available_chip(ctx: &egui::Context, version: &str) -> bool {
                 .corner_radius(CHIP_RADIUS),
             )
             .on_hover_text(format!(
-                "Version {version} is available. Open Settings to review and install."
+                "Version {version} is available. Review and install the update."
             ))
             .clicked()
         })
@@ -2660,12 +2662,17 @@ impl eframe::App for InxmApp {
         if let Some((version, _)) = &self.update_available
             && update_available_chip(ctx, version)
         {
-            if self.onboarding_active {
-                self.dismiss_onboarding();
-            }
-            self.navigate(View::Settings, None);
+            self.update_dialog_open = true;
         }
         mcp::recovery_dialog(ctx, &mut self.mcp, &self.engine);
+        if let Some(command) = settings::update_dialog(
+            ctx,
+            &mut self.update_dialog_open,
+            self.update_available.as_ref(),
+            &self.update_controller,
+        ) {
+            self.handle_update_command(command, ctx);
+        }
     }
 }
 

@@ -917,6 +917,50 @@ fn executable_folders(ui: &mut Ui, state: &mut SettingsState, engine: &EngineHan
     ui.separator();
 }
 
+/// Review and install an update without leaving the current workspace.
+pub fn update_dialog(
+    ctx: &egui::Context,
+    open: &mut bool,
+    available: Option<&(String, String)>,
+    update: &crate::app::update_controller::UpdateController,
+) -> Option<crate::app::update_controller::UpdateCommand> {
+    if !*open {
+        return None;
+    }
+    const DIALOG_WIDTH: f32 = 380.0;
+    const SCREEN_MARGIN: f32 = 32.0;
+    const CONTENT_HEIGHT_FRACTION: f32 = 0.7;
+    const SECTION_SPACING: f32 = 12.0;
+    let response = egui::Modal::new(egui::Id::new("update_dialog"))
+        .frame(theme::card_frame())
+        .show(ctx, |ui| {
+            ui.set_width(DIALOG_WIDTH.min((ctx.screen_rect().width() - SCREEN_MARGIN).max(0.0)));
+            ui.label(theme::title("Update INXM", theme::FONT_HEADING));
+            ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
+            if let Some((version, url)) = available {
+                ui.label(format!("Available version: {version}"));
+                ui.hyperlink_to("Release notes", url);
+            }
+            ui.add_space(SECTION_SPACING);
+            let command = egui::ScrollArea::vertical()
+                .max_height(ctx.screen_rect().height() * CONTENT_HEIGHT_FRACTION)
+                .show(ui, |ui| update_controls(ui, update, available.is_some()))
+                .inner;
+            ui.add_space(SECTION_SPACING);
+            ui.label(
+                RichText::new("Closing this dialog does not cancel an update.")
+                    .size(theme::FONT_SMALL)
+                    .color(theme::text_muted()),
+            );
+            let close = widgets::ghost_button(ui, "Close").clicked();
+            (command, close)
+        });
+    if response.should_close() || response.inner.1 {
+        *open = false;
+    }
+    response.inner.0
+}
+
 fn update_controls(
     ui: &mut Ui,
     update: &crate::app::update_controller::UpdateController,
