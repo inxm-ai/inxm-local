@@ -3412,6 +3412,7 @@ fn fill_binding(binding: &mut RunBinding, run: &Run) {
     binding.inputs = run.inputs.clone();
     let usage = run.token_usage_summary();
     binding.token_usage_total = (!usage.is_empty()).then_some(usage.usage.total());
+    binding.claude_calls = run.archived_claude_calls.clone().into_iter().collect();
     for (step_id, sr) in &run.step_runs {
         if sr.status != StepRunStatus::Pending || !binding.iterations.contains_key(step_id) {
             binding.statuses.insert(step_id.clone(), sr.status.clone());
@@ -3439,7 +3440,9 @@ fn fill_binding(binding: &mut RunBinding, run: &Run) {
         if !sr.claude_calls.is_empty() {
             binding
                 .claude_calls
-                .insert(step_id.clone(), sr.claude_calls.clone());
+                .entry(step_id.clone())
+                .or_default()
+                .extend(sr.claude_calls.iter().cloned());
         }
     }
     binding.finished = Some(run.status.clone());
@@ -3930,6 +3933,38 @@ mod tests {
         assert!(!summary.contains("AI step"), "got: {summary}");
         let binding = binding_from_run(&run);
         assert_eq!(binding.claude_calls["summarize"].len(), 1);
+    }
+
+    #[test]
+    fn archived_claude_usage_survives_step_id_reuse_and_binding_refresh() {
+        let mut run = succeeded_run();
+        let call = |call_id: &str| crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: call_id.to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 20
+            })),
+        };
+        run.archived_claude_calls
+            .insert("summarize".to_owned(), vec![call("old-call")]);
+        assert!(run_summary_text(&run).contains("(120 total)"));
+        assert_eq!(binding_from_run(&run).claude_calls["summarize"].len(), 1);
+
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.claude_calls = vec![call("new-call")];
+        run.step_runs.insert("summarize".to_owned(), step);
+        let mut binding = binding_from_run(&run);
+        fill_binding(&mut binding, &run);
+
+        assert_eq!(
+            binding.claude_calls["summarize"],
+            vec![call("old-call"), call("new-call")]
+        );
+        assert_eq!(run.claude_totals().total, 240);
+        assert!(run_summary_text(&run).contains("(240 total)"));
     }
 
     #[test]
