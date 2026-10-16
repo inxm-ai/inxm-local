@@ -32,7 +32,6 @@ nav:
   - Tutorials:
       - Overview: tutorials/index.md
       - Adding MCP servers: tutorials/mcp-server-examples.md
-      - Morning Briefing Plan: tutorials/morning-briefing.md
   - Reference:
       - Configuration: reference/configuration.md
       - Chat commands: reference/chat-commands.md
@@ -44,4 +43,3 @@ nav:
       - Set up the repository: development/setup.md
       - Test and validate changes: development/testing.md
       - Contributing: development/contributing.md
-
