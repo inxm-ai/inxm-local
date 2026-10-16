@@ -72,6 +72,7 @@ fn compile_live(intent: &str) -> Plan {
     handle.send(EngineCommand::AssessIntent {
         intent: intent.to_owned(),
         conversation: conversation.clone(),
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let assessment = wait_for(&events, "AssessmentReady", |event| match event {
         EngineEvent::AssessmentReady { assessment } => Some(*assessment),
@@ -84,6 +85,7 @@ fn compile_live(intent: &str) -> Plan {
         conversation: conversation.clone(),
         previous_design: None,
         feedback: None,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let design = wait_for(&events, "DesignReady", |event| match event {
         EngineEvent::DesignReady { design } => Some(*design),
@@ -95,9 +97,10 @@ fn compile_live(intent: &str) -> Plan {
         spec: assessment.spec,
         design: Some(Box::new(design)),
         conversation,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     wait_for(&events, "PlanCompiled", |event| match event {
-        EngineEvent::PlanCompiled { plan } => Some(*plan),
+        EngineEvent::PlanCompiled { plan, .. } => Some(*plan),
         _ => None,
     })
 }
@@ -301,6 +304,7 @@ fn dossier_compiles_live_with_invocation_inputs_and_approval_only_hitl() {
     handle.send(EngineCommand::AssessIntent {
         intent: DOSSIER_INTENT.to_owned(),
         conversation: conversation.clone(),
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let assessment = wait_for(&events, "AssessmentReady", |event| match event {
         EngineEvent::AssessmentReady { assessment } => Some(*assessment),
@@ -333,6 +337,7 @@ fn dossier_compiles_live_with_invocation_inputs_and_approval_only_hitl() {
         conversation: conversation.clone(),
         previous_design: None,
         feedback: None,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let design = wait_for(&events, "DesignReady", |event| match event {
         EngineEvent::DesignReady { design } => Some(*design),
@@ -353,9 +358,10 @@ fn dossier_compiles_live_with_invocation_inputs_and_approval_only_hitl() {
         spec: assessment.spec,
         design: Some(Box::new(design)),
         conversation,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let plan = wait_for(&events, "PlanCompiled", |event| match event {
-        EngineEvent::PlanCompiled { plan } => Some(*plan),
+        EngineEvent::PlanCompiled { plan, .. } => Some(*plan),
         _ => None,
     });
 

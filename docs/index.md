@@ -12,6 +12,10 @@ INXM Local turns a natural-language request into a validated plan, then executes
 		<p>Run and manage plans, connect tools, schedule workflows, and use coding agents.</p>
 	</li>
 	<li>
+		<a href="tutorials/">Tutorials</a>
+		<p>Follow concrete examples, from connecting MCP servers to creating working plans.</p>
+	</li>
+	<li>
 		<a href="reference/configuration/">Reference</a>
 		<p>Look up configuration, chat commands, MCP tools, and telemetry behavior.</p>
 	</li>

@@ -5,6 +5,7 @@ persists run state before and after each step.
 
 Files:
 - `dag.rs` — topological step ordering
+- `usage.rs` — per-attempt Claude API token usage trackers
 - `step_runners/` — one runner per step type: `tool_call`, `prompt_call`,
   `code_call`, `condition`, `fan` (FAN_OUT), `human`
 

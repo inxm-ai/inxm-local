@@ -21,9 +21,11 @@ const COL_RUN_ID: f32 = 78.0;
 const COL_SOURCE: f32 = 82.0;
 const COL_STARTED: f32 = 104.0;
 const COL_DURATION: f32 = 170.0;
+/// Trailing delete cell; wide enough for the "Delete?" confirmation.
+const COL_DELETE: f32 = 52.0;
 /// Space the flexible PLAN cell must leave for everything to its right
-/// (source, started, duration, Inspect button, spacings).
-const PLAN_RESERVED: f32 = COL_SOURCE + COL_STARTED + COL_DURATION + 130.0;
+/// (source, started, duration, Inspect button, delete cell, spacings).
+const PLAN_RESERVED: f32 = COL_SOURCE + COL_STARTED + COL_DURATION + COL_DELETE + 130.0;
 /// Failed rows show a short error summary in the duration column; the full
 /// message stays reachable on hover.
 const ERROR_SUMMARY_MAX_CHARS: usize = 24;
@@ -44,6 +46,8 @@ pub struct RunsState {
     pub aborting: std::collections::HashSet<String>,
     /// Running rows that could not be matched to a live execution in this process.
     pub abort_failed: std::collections::HashSet<String>,
+    /// Run whose ✕ was clicked once and awaits a second click.
+    pub confirm_delete: Option<String>,
 }
 
 /// Actions the shell must react to (navigation / engine commands).
@@ -58,6 +62,66 @@ pub enum RunsAction {
     InspectReadOnly { run_id: String },
     /// Abort an in-progress run.
     Abort { run_id: String },
+    /// First click on ✕: ask the user to confirm.
+    AskDelete { run_id: String },
+    /// Confirmed deletion of a finished run.
+    Delete { run_id: String },
+}
+
+fn next_delete_confirmation(
+    pending_run_id: Option<&str>,
+    action: Option<&RunsAction>,
+) -> Option<String> {
+    match action {
+        Some(RunsAction::AskDelete { run_id }) => Some(run_id.clone()),
+        Some(RunsAction::Delete { run_id }) if pending_run_id == Some(run_id.as_str()) => None,
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod delete_confirmation_tests {
+    use super::*;
+
+    #[test]
+    fn other_action_clears_pending_delete_confirmation() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::Inspect {
+                    plan_id: "plan-a".to_owned(),
+                    run_id: "run-b".to_owned(),
+                }),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn asking_to_delete_another_run_arms_only_that_run() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::AskDelete {
+                    run_id: "run-b".to_owned(),
+                }),
+            ),
+            Some("run-b".to_owned())
+        );
+    }
+
+    #[test]
+    fn confirming_the_pending_run_clears_confirmation() {
+        assert_eq!(
+            next_delete_confirmation(
+                Some("run-a"),
+                Some(&RunsAction::Delete {
+                    run_id: "run-a".to_owned(),
+                }),
+            ),
+            None
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -89,6 +153,7 @@ pub fn show(
     agent_mode: bool,
 ) -> Option<RunsAction> {
     let mut action = None;
+    let pending_delete = state.confirm_delete.clone();
     let running_count = count_running(runs);
 
     widgets::scroll_area_vertical()
@@ -167,6 +232,10 @@ pub fn show(
             );
             ui.add_space(12.0);
         });
+
+    if ui.input(|input| input.pointer.any_click()) {
+        state.confirm_delete = next_delete_confirmation(pending_delete.as_deref(), action.as_ref());
+    }
 
     action
 }
@@ -255,7 +324,7 @@ fn header_row(ui: &mut Ui) {
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             // Blank space over the Inspect column keeps DURATION centered
             // over its cells.
-            ui.add_space(76.0);
+            ui.add_space(76.0 + COL_DELETE);
             ui.scope(|ui| {
                 ui.set_width(COL_DURATION);
                 caption(ui, "DURATION");
@@ -337,6 +406,36 @@ fn run_row(
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(COL_DELETE, ui.spacing().interact_size.y),
+                    Layout::right_to_left(Align::Center),
+                    |ui| {
+                        if running {
+                            return;
+                        }
+                        let confirming = state.confirm_delete.as_deref() == Some(run.id.as_str());
+                        let (glyph, color) = match confirming {
+                            true => ("Delete?", theme::err()),
+                            false => ("✕", theme::text_faint()),
+                        };
+                        let delete = ui.add(
+                            egui::Label::new(
+                                RichText::new(glyph).size(theme::FONT_SMALL).color(color),
+                            )
+                            .sense(Sense::click()),
+                        );
+                        if delete.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        if delete.clicked() {
+                            let run_id = run.id.clone();
+                            action = Some(match confirming {
+                                true => RunsAction::Delete { run_id },
+                                false => RunsAction::AskDelete { run_id },
+                            });
+                        }
+                    },
+                );
                 if widgets::ghost_button(ui, "Inspect").clicked() {
                     action = Some(match agent_mode {
                         true => RunsAction::InspectReadOnly {

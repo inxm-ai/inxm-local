@@ -94,10 +94,12 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         "external runner completed"
     );
 
-    let usage = response.input_tokens.map(|input_tokens| TokenUsage {
-        input_tokens,
-        output_tokens: response.output_tokens.unwrap_or(0),
-    });
+    let usage_recording_enabled = if crate::llm::is_anthropic_api(&profile.base_url) {
+        crate::executor::usage::current_usage_enabled()
+    } else {
+        None
+    };
+    let usage = token_usage(&response, usage_recording_enabled);
     let mut outputs = IndexMap::new();
     outputs.insert(
         cfg.output_field.clone(),
@@ -109,6 +111,27 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         stderr: None,
         usage,
         child_runs: IndexMap::new(),
+    })
+}
+
+/// Step token usage for the run summary. Claude input includes cache reads
+/// and writes; usage is kept when either count was reported.
+fn token_usage(
+    response: &crate::llm::CompletionResponse,
+    usage_recording_enabled: Option<bool>,
+) -> Option<TokenUsage> {
+    if response.usage.is_some() && usage_recording_enabled == Some(false) {
+        return None;
+    }
+    let input = response
+        .usage
+        .as_ref()
+        .and_then(crate::llm::ClaudeUsage::total_input)
+        .or(response.input_tokens);
+    let output = response.output_tokens;
+    (input.is_some() || output.is_some()).then(|| TokenUsage {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
     })
 }
 
@@ -165,5 +188,90 @@ fn failed(ctx: &StepContext, message: impl Into<String>) -> ExecutorError {
     ExecutorError::StepFailed {
         step_id: ctx.step.id.clone(),
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::CompletionResponse;
+
+    fn response(
+        input: Option<u64>,
+        output: Option<u64>,
+        usage: Option<serde_json::Value>,
+    ) -> CompletionResponse {
+        CompletionResponse {
+            text: "ok".to_owned(),
+            input_tokens: input,
+            output_tokens: output,
+            usage: usage.and_then(|usage| crate::llm::parse_claude_usage(&usage)),
+        }
+    }
+
+    #[test]
+    fn claude_input_includes_cache_reads_and_writes() {
+        let usage = token_usage(
+            &response(
+                Some(10),
+                Some(5),
+                Some(serde_json::json!({
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "cache_creation_input_tokens": 20,
+                    "cache_read_input_tokens": 300
+                })),
+            ),
+            Some(true),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, 330);
+        assert_eq!(usage.output_tokens, 5);
+    }
+
+    #[test]
+    fn output_only_usage_is_kept() {
+        let usage = token_usage(&response(None, Some(7), None), Some(true)).unwrap();
+        assert_eq!(usage.input_tokens, 0);
+        assert_eq!(usage.output_tokens, 7);
+        assert!(token_usage(&response(None, None, None), Some(true)).is_none());
+    }
+
+    #[test]
+    fn non_claude_usage_falls_back_to_reported_counts() {
+        let usage = token_usage(&response(Some(4), Some(2), None), Some(false)).unwrap();
+        assert_eq!(usage.total(), 6);
+    }
+
+    #[test]
+    fn disabled_usage_recording_suppresses_claude_token_totals() {
+        let response = response(
+            Some(10),
+            Some(5),
+            Some(serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 300
+            })),
+        );
+
+        assert!(token_usage(&response, Some(false)).is_none());
+    }
+
+    #[test]
+    fn disabled_recording_does_not_hide_compatible_endpoint_summaries() {
+        let response = response(
+            Some(10),
+            Some(5),
+            Some(serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_read_input_tokens": 300
+            })),
+        );
+
+        let usage = token_usage(&response, None).unwrap();
+        assert_eq!(usage.input_tokens, 310);
+        assert_eq!(usage.output_tokens, 5);
     }
 }

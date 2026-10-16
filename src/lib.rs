@@ -17,3 +17,4 @@ pub mod support;
 pub mod telemetry;
 pub mod tools;
 pub mod validator;
+pub mod version;
