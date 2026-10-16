@@ -196,6 +196,9 @@ pub struct Run {
     /// Step runs keyed by step ID, in insertion order.
     #[serde(default)]
     pub step_runs: IndexMap<String, StepRun>,
+    /// Recorded calls from steps removed by a repair, keyed by their original ID.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub archived_claude_calls: IndexMap<String, Vec<ClaudeCallSummary>>,
     /// The plan's published outputs, resolved from `plan.outputs` against the
     /// completed run's step outputs. Populated once the run succeeds; shown
     /// to the user as the run's "final result".
@@ -215,6 +218,7 @@ impl Run {
             source: None,
             inputs: IndexMap::new(),
             step_runs: IndexMap::new(),
+            archived_claude_calls: IndexMap::new(),
             outputs: IndexMap::new(),
         }
     }
@@ -230,7 +234,8 @@ impl Run {
         TokenTotals::from_summaries(
             self.step_runs
                 .values()
-                .flat_map(|step_run| &step_run.claude_calls),
+                .flat_map(|step_run| &step_run.claude_calls)
+                .chain(self.archived_claude_calls.values().flatten()),
         )
     }
 

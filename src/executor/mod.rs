@@ -315,16 +315,29 @@ pub async fn resume_from_repair(
     run.inputs = inputs;
     inject_runtime_inputs(&mut plan, &run.inputs);
 
-    // A step whose ID no longer exists in the new plan (renamed/replaced by
-    // the patch) carries no useful state forward for that plan; drop it
-    // rather than leak a stale entry. `execute_run` treats a missing entry
-    // exactly like a fresh `Pending` one, so this is harmless.
+    // Removed steps lose their execution checkpoints, but their billed calls
+    // still belong to this run.
+    for (step_id, step_run) in &mut run.step_runs {
+        if plan.step(step_id).is_none() && !step_run.claude_calls.is_empty() {
+            run.archived_claude_calls
+                .entry(step_id.clone())
+                .or_default()
+                .append(&mut step_run.claude_calls);
+        }
+    }
     run.step_runs
         .retain(|step_id, _| plan.step(step_id).is_some());
 
     for step_id in reset_step_ids {
-        run.step_runs
-            .insert(step_id.clone(), StepRun::new(&step_id));
+        let step_run = run
+            .step_runs
+            .entry(step_id.clone())
+            .or_insert_with(|| StepRun::new(&step_id));
+        let claude_calls = std::mem::take(&mut step_run.claude_calls);
+        *step_run = StepRun {
+            claude_calls,
+            ..StepRun::new(&step_id)
+        };
     }
     for step in &plan.steps {
         run.step_runs
