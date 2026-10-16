@@ -70,6 +70,8 @@ Fields Anthropic leaves out or sets to `null` are stored as `null`, not `0`. API
 
 Run files also list the Claude API calls for each step under `claude_calls`, so you can read a run's usage without opening the ledger.
 
+Repairing and resuming a run does not erase its recorded token usage. Calls from retried steps stay in that step's `claude_calls` list. If a repair removes a step or replaces it with one that has a different ID, its earlier calls are kept under the original step ID in the run's `archived_claude_calls`. All of these calls still count toward the run's token totals.
+
 ## Computing totals
 
 Per call:

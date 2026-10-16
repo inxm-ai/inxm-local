@@ -1292,6 +1292,97 @@ fn resume_config(storage: Arc<StorageRoot>) -> ExecutorConfig {
     }
 }
 
+fn recorded_claude_call(call_id: &str) -> inxm_local::storage::llm_usage::ClaudeCallSummary {
+    inxm_local::storage::llm_usage::ClaudeCallSummary {
+        call_id: call_id.to_owned(),
+        attempt: 1,
+        iteration: None,
+        outcome: inxm_local::llm::ClaudeCallOutcome::NoTextBlock,
+        usage: inxm_local::llm::parse_claude_usage(&serde_json::json!({
+            "input_tokens": 100,
+            "output_tokens": 20
+        })),
+    }
+}
+
+#[tokio::test]
+async fn resume_from_repair_preserves_usage_across_reset_steps_and_persistence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageRoot::open(dir.path()).expect("storage"));
+    let mut failed = run_until_flaky_fails(storage.clone(), base_repair_plan("fail")).await;
+    for step_id in ["setup", "flaky", "after"] {
+        failed.step_runs.get_mut(step_id).unwrap().claude_calls =
+            vec![recorded_claude_call(step_id)];
+    }
+    let expected_total = failed.claude_totals();
+    let patched_plan = as_next_version_of(base_repair_plan("echo"), &failed);
+
+    let resumed = resume_from_repair(
+        patched_plan,
+        resume_config(storage.clone()),
+        failed,
+        Default::default(),
+        RepairResumeMode::PatchedPlan,
+    )
+    .await
+    .expect("resume should succeed");
+
+    assert_eq!(resumed.status, RunStatus::Succeeded);
+    assert_eq!(resumed.claude_totals(), expected_total);
+    for step_id in ["setup", "flaky", "after"] {
+        assert_eq!(
+            resumed.step_runs[step_id].claude_calls,
+            vec![recorded_claude_call(step_id)]
+        );
+    }
+    assert_eq!(storage.runs().load(&resumed.id).unwrap(), resumed);
+    let binding = inxm_local::app::views::chat::binding_from_run(&resumed);
+    assert_eq!(
+        binding.claude_calls["flaky"],
+        resumed.step_runs["flaky"].claude_calls
+    );
+}
+
+#[tokio::test]
+async fn resume_from_repair_preserves_usage_of_replaced_steps() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let storage = Arc::new(StorageRoot::open(dir.path()).expect("storage"));
+    let mut failed = run_until_flaky_fails(storage.clone(), base_repair_plan("fail")).await;
+    let call = recorded_claude_call("replaced-step-call");
+    failed.step_runs.get_mut("flaky").unwrap().claude_calls = vec![call.clone()];
+    let expected_total = failed.claude_totals();
+    let mut patched_plan = as_next_version_of(base_repair_plan("echo"), &failed);
+    patched_plan
+        .steps
+        .iter_mut()
+        .find(|step| step.id == "flaky")
+        .unwrap()
+        .id = "replacement".to_owned();
+    patched_plan
+        .steps
+        .iter_mut()
+        .find(|step| step.id == "after")
+        .unwrap()
+        .depends_on = vec!["replacement".to_owned()];
+
+    let resumed = resume_from_repair(
+        patched_plan,
+        resume_config(storage.clone()),
+        failed,
+        Default::default(),
+        RepairResumeMode::PatchedPlan,
+    )
+    .await
+    .expect("resume should succeed with the replacement step");
+
+    assert_eq!(resumed.status, RunStatus::Succeeded);
+    assert!(!resumed.step_runs.contains_key("flaky"));
+    assert_eq!(resumed.claude_totals(), expected_total);
+    assert_eq!(storage.runs().load(&resumed.id).unwrap(), resumed);
+    let binding = inxm_local::app::views::chat::binding_from_run(&resumed);
+    assert_eq!(binding.claude_calls["flaky"], vec![call]);
+}
+
 #[tokio::test]
 async fn resume_from_repair_skips_already_succeeded_upstream_steps() {
     let dir = tempfile::tempdir().expect("tempdir");
