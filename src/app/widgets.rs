@@ -485,6 +485,8 @@ pub enum Icon {
     Collapse,
     /// Plus sign — add / create action.
     Plus,
+    /// Down arrow into a tray — download or install an update.
+    Download,
     /// Three ascending bars — a compact dashboard/chart glyph, distinct from
     /// the `Plans` DAG icon; used for the top-bar "Overview" shortcut.
     Overview,
@@ -628,6 +630,27 @@ pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color3
                 painter.line_segment([head, head + direction + normal], stroke);
                 painter.line_segment([head, head + direction - normal], stroke);
             }
+        }
+        Icon::Download => {
+            let tip = Pos2::new(r.center().x, r.center().y + 2.0);
+            painter.line_segment([Pos2::new(tip.x, r.top()), tip], stroke);
+            painter.add(egui::Shape::line(
+                vec![
+                    Pos2::new(r.left() + 3.0, tip.y - 4.0),
+                    tip,
+                    Pos2::new(r.right() - 3.0, tip.y - 4.0),
+                ],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![
+                    Pos2::new(r.left(), r.bottom() - 3.0),
+                    r.left_bottom(),
+                    r.right_bottom(),
+                    Pos2::new(r.right(), r.bottom() - 3.0),
+                ],
+                stroke,
+            ));
         }
         Icon::Plus => {
             painter.line_segment(

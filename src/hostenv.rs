@@ -18,6 +18,82 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// A validated PATH plus nonfatal diagnostics for configured directories.
+#[derive(Debug)]
+pub struct ExecutablePath {
+    pub path: std::ffi::OsString,
+    pub warnings: Vec<String>,
+}
+
+/// Validate one directory without requiring it to exist yet.
+pub fn validate_executable_dir(directory: &str) -> Result<(), String> {
+    let path = Path::new(directory);
+    if !path.is_absolute() {
+        return Err(format!(
+            "Executable folder must be an absolute path: {directory}"
+        ));
+    }
+    if directory.contains('\0') || std::env::join_paths([path]).is_err() {
+        return Err(format!(
+            "Executable folder cannot be encoded in PATH: {directory}"
+        ));
+    }
+    if path.exists() && !path.is_dir() {
+        return Err(format!("Executable folder is not a directory: {directory}"));
+    }
+    Ok(())
+}
+
+fn executable_dirs_equal(left: &Path, right: &Path) -> bool {
+    #[cfg(windows)]
+    if let (Some(left), Some(right)) = (left.to_str(), right.to_str()) {
+        return left.eq_ignore_ascii_case(right);
+    }
+    left == right
+}
+
+/// Prepend ordered extra directories and remove duplicate PATH entries.
+pub fn executable_path(
+    extra_dirs: &[String],
+    inherited: &std::ffi::OsStr,
+) -> Result<ExecutablePath, String> {
+    let mut dirs = Vec::<PathBuf>::new();
+    let mut warnings = Vec::new();
+    for directory in extra_dirs {
+        validate_executable_dir(directory)?;
+        let path = PathBuf::from(directory);
+        if !path.is_dir() {
+            warnings.push(format!("Executable folder does not exist: {directory}"));
+        }
+        if !dirs
+            .iter()
+            .any(|existing| executable_dirs_equal(existing, &path))
+        {
+            dirs.push(path);
+        }
+    }
+    for path in std::env::split_paths(inherited) {
+        if !dirs
+            .iter()
+            .any(|existing| executable_dirs_equal(existing, &path))
+        {
+            dirs.push(path);
+        }
+    }
+    let path = std::env::join_paths(dirs).map_err(|error| error.to_string())?;
+    Ok(ExecutablePath { path, warnings })
+}
+
+/// Call only during startup, before environment probes or worker threads.
+///
+/// Validation is atomic: invalid configuration leaves inherited PATH untouched.
+pub fn configure_executable_dirs(extra_dirs: &[String]) -> Result<Vec<String>, String> {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let configured = executable_path(extra_dirs, &inherited)?;
+    // Startup callers invoke this before spawning any worker or GUI threads.
+    unsafe { std::env::set_var("PATH", configured.path) };
+    Ok(configured.warnings)
+}
 /// Interpreters probed for CODE_CALL support, in the order they are
 /// preferred as aliases of each other (e.g. `python3` before `python`).
 const PROBED_INTERPRETERS: &[&str] = &[
@@ -151,6 +227,26 @@ fn home_dir() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Resolve against an explicit tool PATH only, without inherited fallbacks.
+pub fn find_program_in_path(
+    program: &str,
+    path: &std::ffi::OsStr,
+    pathext: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let extensions = pathext.and_then(std::ffi::OsStr::to_str);
+    if program.contains(['/', '\\']) {
+        let base = Path::new(program);
+        let dir = base.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let name = base.file_name()?.to_string_lossy().into_owned();
+        if base.is_file() {
+            return Some(base.to_owned());
+        }
+        return find_in_dirs(&name, &[dir], extensions);
+    }
+    let dirs: Vec<_> = std::env::split_paths(path).collect();
+    find_in_dirs(program, &dirs, extensions)
 }
 
 /// Locate `program` on `PATH`, falling back to [`well_known_bin_dirs`] so a
@@ -725,7 +821,10 @@ impl EnvProbe {
              shell syntax native to this operating system. A shell language such \
              as `cmd` only means that interpreter exists; it does not imply CLI \
              helpers like `curl`, `wget`, or `git` exist. Prefer TOOL_CALL steps \
-             over CODE_CALL when a catalog tool covers the need.",
+             over CODE_CALL when a catalog tool covers the need. If a required executable \
+             is missing, ask the user to add its installation folder in Settings > \
+             Extra executable folders and fully quit and reopen the app. Never \
+             silently modify PATH or install software to repair a plan.",
             self.os,
             self.arch,
             join_or_none(&self.interpreters),
@@ -1173,5 +1272,97 @@ mod tests {
         let error = capture_shell_env(fake_shell("exit 3"), None, "MARK", Duration::from_secs(5))
             .unwrap_err();
         assert!(error.contains("printed no environment"), "{error}");
+    }
+}
+
+#[cfg(test)]
+mod executable_directory_tests {
+    use super::*;
+
+    #[test]
+    fn extra_folders_precede_and_deduplicate_inherited_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("folder with spaces");
+        let second = temp.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let inherited = std::env::join_paths([&second, &first, &second]).unwrap();
+        let configured =
+            executable_path(&[first.to_string_lossy().into_owned()], &inherited).unwrap();
+        assert_eq!(
+            std::env::split_paths(&configured.path).collect::<Vec<_>>(),
+            [first, second]
+        );
+        assert!(configured.warnings.is_empty());
+    }
+
+    #[test]
+    fn invalid_folders_fail_and_missing_absolute_folders_warn() {
+        assert!(validate_executable_dir("relative/bin").is_err());
+        assert!(validate_executable_dir("/invalid\0folder").is_err());
+        #[cfg(unix)]
+        assert!(validate_executable_dir("/invalid:folder").is_err());
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, "").unwrap();
+        assert!(validate_executable_dir(&file.to_string_lossy()).is_err());
+        let missing = temp.path().join("missing");
+        let configured = executable_path(
+            &[missing.to_string_lossy().into_owned()],
+            std::ffi::OsStr::new(""),
+        )
+        .unwrap();
+        assert_eq!(configured.warnings.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_child_discovers_custom_executable_only_after_configuration() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("custom tools");
+        std::fs::create_dir(&bin).unwrap();
+        let fixture = bin.join("inxm-discovery-fixture");
+        std::fs::write(&fixture, "#!/bin/sh\nprintf discovered").unwrap();
+        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let inherited = std::env::join_paths([Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+        let run = |path: &std::ffi::OsStr| {
+            Command::new("/bin/sh")
+                .args(["-c", "inxm-discovery-fixture"])
+                .env("PATH", path)
+                .output()
+                .unwrap()
+        };
+        assert!(!run(&inherited).status.success());
+        let configured =
+            executable_path(&[bin.to_string_lossy().into_owned()], &inherited).unwrap();
+        let output = run(&configured.path);
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"discovered");
+        let override_path = std::env::join_paths([Path::new("/bin")]).unwrap();
+        assert!(!run(&override_path).status.success());
+    }
+}
+
+#[cfg(test)]
+mod explicit_path_tests {
+    use super::*;
+    #[test]
+    fn explicit_path_does_not_fall_back_and_honours_pathext() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("tool folder");
+        std::fs::create_dir(&directory).unwrap();
+        let fixture = directory.join("custom.cmd");
+        std::fs::write(&fixture, "").unwrap();
+        let path = std::env::join_paths([&directory]).unwrap();
+        assert_eq!(
+            find_program_in_path("custom", &path, Some(std::ffi::OsStr::new(".EXE;.CMD"))),
+            Some(fixture)
+        );
+        assert_eq!(find_program_in_path("custom", &path, None), None);
+        assert_eq!(
+            find_program_in_path("gh", std::ffi::OsStr::new(""), None),
+            None
+        );
     }
 }

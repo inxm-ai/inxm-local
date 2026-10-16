@@ -12,6 +12,21 @@ cargo test --all-targets --all-features
 
 The CI workflow runs these checks on pull requests and pushes to `main`. Linux CI installs the native GTK, AppIndicator, OpenSSL, XCB, and XKB packages before building.
 
+## Desktop regression checks
+
+`integration_documentation` verifies that embedded pages use the MkDocs
+navigation and original Markdown, including internal page and heading links.
+`integration_executable_discovery` uses an isolated process and a fixture
+executable in a folder containing spaces to exercise environment detection,
+subprocess tools, stdio MCP, generated-code execution, and explicit tool PATH
+overrides. `integration_update_gate` verifies work and installation exclusion
+between separate processes.
+
+Updater unit fixtures verify asset selection, mandatory release digests,
+download integrity, cancellation, transactional replacement and rollback, and
+installer arguments without changing a real installation. Installer handoffs
+still need native smoke checks on macOS, Windows, and Linux before release.
+
 ## MCP self-test
 
 The repository includes a live HTTP flow that starts the local MCP server, lists tools, executes the seeded `echo` tool, inspects persisted inputs, and exercises schedule storage:

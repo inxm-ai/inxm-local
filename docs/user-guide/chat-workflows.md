@@ -4,6 +4,15 @@ Use a plan's chat to edit the plan, supply inputs, run it, and handle repair or 
 
 Each chat is a conversation owned by at most one plan. A new chat starts without a plan: describe a workflow in plain language or use `/compile` to create one. After a plan is created, that conversation becomes its plan chat; opening the plan or one of its runs returns to the same conversation. Start a new chat when you want to create a separate plan.
 
+## Write and send a message
+
+Enter and Shift+Enter insert newlines in the main chat composer. Send with
+Cmd+Enter on macOS, Ctrl+Enter on any platform, or the **Send** button. Pasted
+multiline text stays intact. Whitespace-only messages are ignored.
+
+Use Tab or click a suggestion to complete a command. Sending submits the text
+currently in the composer, including a partially typed command.
+
 ## Compile or edit a plan
 
 In a new chat, enter plain-language intent or use `/compile <intent>`. In a chat that owns a plan, use `/edit <change>` to request an LLM-assisted edit. Review proposed edits before applying them.
@@ -25,6 +34,21 @@ When a plan reaches a `HUMAN_INTERACTION` step, the plan card pauses and display
 ## Inspect, repair, and resume
 
 Use `/inspect [run-id]` for step details. For a failed run, `/repair [run-id]` asks the compiler to propose a patch or identify an external problem. Apply or reject a proposed patch with `/apply <patch-id>` or `/reject <patch-id> [reason]`. After applying a patch, `/resume <run-id>` reruns the failed step and its downstream steps against the new plan version. For an external problem, fix it first, then use `/resume <run-id>` with the same plan version.
+
+Open plan JSON, run JSON, or structured step details in the read-only inspector.
+Resize its right-side panel or choose **Expand** to fill the content area. Use
+**Copy** for the complete content, toggle line wrapping, and **Close** to return.
+Valid JSON is formatted and highlighted; other output appears as plain text.
+
+## Read documentation offline
+
+Open **Documentation** from navigation in either the normal or agent interface.
+The installed binary includes these documentation pages, so browsing and
+case-insensitive full-text search work offline. Search results include snippets;
+select a result to open its page. Internal links stay in the app, **Back** returns
+to the previous page, and **Open online** opens the corresponding website page.
+Mermaid diagrams appear as readable source with a link to the online rendering.
+Bundled documentation follows the installed version.
 
 ## Find plans and runs
 

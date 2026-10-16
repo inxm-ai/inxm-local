@@ -15,7 +15,9 @@ pub mod commands;
 pub mod console;
 mod debug_shot;
 mod demo;
+pub mod documentation;
 pub mod engine;
+mod inspector;
 pub mod mcp_server;
 pub mod mutation;
 pub mod schedule_store;
@@ -25,6 +27,9 @@ pub mod support;
 pub mod theme;
 pub mod time;
 mod tray;
+mod update_controller;
+pub mod update_gate;
+pub mod updater;
 pub mod views;
 pub mod widgets;
 
@@ -193,6 +198,7 @@ enum View {
     Schedules,
     Mcp,
     Settings,
+    Documentation,
 }
 
 /// A single entry in the navigation back-stack: which view, and — for
@@ -264,7 +270,11 @@ fn agent_mode_enabled() -> bool {
 /// Schedules (both chat-centric surfaces) are unreachable, and `navigate`
 /// enforces this for every code path, not just the nav items that render.
 fn view_available(view: View, agent_mode: bool) -> bool {
-    !agent_mode || matches!(view, View::Plans | View::Runs | View::Mcp | View::Settings)
+    !agent_mode
+        || matches!(
+            view,
+            View::Plans | View::Runs | View::Mcp | View::Settings | View::Documentation
+        )
 }
 
 /// Whether this launch should show the first-run setup assistant.
@@ -296,7 +306,7 @@ fn view_time_bucket(view: View) -> crate::telemetry::usage::ViewKind {
         View::Plans | View::Runs => ViewKind::Plans,
         View::Schedules => ViewKind::Schedules,
         View::Mcp => ViewKind::McpTools,
-        View::Settings => ViewKind::Settings,
+        View::Settings | View::Documentation => ViewKind::Settings,
     }
 }
 
@@ -307,6 +317,7 @@ const NAV_ITEMS: &[(View, Icon, &str)] = &[
     (View::Schedules, Icon::Schedules, "Schedules"),
     (View::Mcp, Icon::Tools, "MCP Tools"),
     (View::Settings, Icon::Settings, "Settings"),
+    (View::Documentation, Icon::Plans, "Documentation"),
 ];
 
 pub struct InxmApp {
@@ -338,6 +349,7 @@ pub struct InxmApp {
     schedules_view: SchedulesState,
     mcp: McpState,
     settings: SettingsState,
+    documentation: documentation::DocumentationState,
     mcp_status: mcp_server::ServerStatus,
     mcp_status_rx: std::sync::mpsc::Receiver<mcp_server::ServerStatus>,
     tools: Vec<crate::tools::catalog::ToolEntry>,
@@ -349,6 +361,8 @@ pub struct InxmApp {
     shot: debug_shot::ShotState,
     /// Set once a `CheckForUpdates` round-trip finds a newer GitHub release.
     update_available: Option<(String, String)>,
+    update_controller: update_controller::UpdateController,
+    update_dialog_open: bool,
     tray: Option<tray::TrayController>,
     /// Theme the tray icon currently shows; compared against `theme::is_dark`
     /// every frame so the icon follows theme changes from any source (the
@@ -535,7 +549,9 @@ impl InxmApp {
             runs_view: RunsState::default(),
             schedules_view: SchedulesState::default(),
             mcp: McpState::default(),
+            documentation: documentation::DocumentationState::default(),
             settings: SettingsState {
+                executable_dir_error: None,
                 draft: settings.clone(),
                 codex_sandbox_test: None,
                 update_check: None,
@@ -553,6 +569,8 @@ impl InxmApp {
             environment: String::new(),
             shot: debug_shot::ShotState::from_env(),
             update_available: None,
+            update_controller: update_controller::UpdateController::default(),
+            update_dialog_open: false,
             tray,
             tray_icon_dark: theme::is_dark(),
             quit_requested,
@@ -820,6 +838,57 @@ impl InxmApp {
     // ─── Chat sessions ────────────────────────────────────────────────────────
 
     /// Persist the conversation when it changed since the last save.
+    fn persist_update_drafts(&self) -> Result<(), String> {
+        chat_store::save(
+            &self.paths.data_dir,
+            &self.session_id,
+            self.session_created_at,
+            &self.chat,
+        )
+        .map_err(|e| format!("Could not save current draft: {e}"))?;
+        for (id, parked) in &self.parked_chats {
+            chat_store::save(&self.paths.data_dir, id, parked.created_at, &parked.chat)
+                .map_err(|e| format!("Could not save parked draft: {e}"))?;
+        }
+        Ok(())
+    }
+
+    fn handle_update_command(
+        &mut self,
+        command: update_controller::UpdateCommand,
+        ctx: &egui::Context,
+    ) {
+        use update_controller::UpdateCommand;
+        match command {
+            UpdateCommand::DownloadAndInstall => self.update_controller.begin(ctx),
+            UpdateCommand::Cancel => self.update_controller.cancel(),
+            UpdateCommand::Retry => self.update_controller.retry(ctx),
+            UpdateCommand::RestartLater => self.update_controller.restart_later = true,
+            UpdateCommand::RestartNow => {
+                if let Err(error) = self.persist_update_drafts() {
+                    self.update_controller.failure(error);
+                    return;
+                }
+                if self.update_controller.installer_handoff {
+                    self.quit_requested
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    let restart = std::env::current_exe().and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .args(std::env::args_os().skip(1))
+                            .env("INXM_RESTART_WAIT_PID", std::process::id().to_string())
+                            .spawn()
+                    });
+                    match restart {
+                        Ok(_) => { self.quit_requested.store(true, std::sync::atomic::Ordering::Relaxed); ctx.send_viewport_cmd(egui::ViewportCommand::Close); }
+                        Err(error) => self.update_controller.failure(format!("Update installed, but restart failed: {error}. Fully quit and reopen the app.")),
+                    }
+                }
+            }
+        }
+    }
+
     fn autosave_chat(&mut self) {
         let fingerprint = chat_store::fingerprint(&self.chat);
         if fingerprint == self.last_saved_fingerprint {
@@ -1695,7 +1764,6 @@ impl InxmApp {
         ui.add_space(20.0);
 
         // fold (not filter+find): every item must render each frame, in order.
-        let update_available = self.update_available.is_some();
         let running_count = runs::count_running(&self.plans.runs);
         let on_chat = self.view == View::Chat;
         let (switch_to, selected_rect) = NAV_ITEMS
@@ -1706,7 +1774,6 @@ impl InxmApp {
                 |(clicked, selected_rect), (view, icon, label)| {
                     let selected = self.view == *view;
                     let badge = match view {
-                        View::Settings if update_available => NavBadge::Dot,
                         // Hidden entirely while nothing runs — the pill only
                         // exists to answer "is something running right now?".
                         View::Runs if running_count > 0 => NavBadge::Running(running_count),
@@ -1776,7 +1843,13 @@ impl InxmApp {
         // Without this bound, a `bottom_up` footer and a growing chat list can
         // occupy the same vertical range and visually overlap.
         if !self.agent_mode {
-            let chats_max_h = (ui.available_height() - SIDEBAR_FOOTER_HEIGHT).max(0.0);
+            let footer_height = SIDEBAR_FOOTER_HEIGHT
+                + if self.update_available.is_some() {
+                    theme::GAP * 2.0
+                } else {
+                    0.0
+                };
+            let chats_max_h = (ui.available_height() - footer_height).max(0.0);
             ui.allocate_ui(egui::vec2(ui.available_width(), chats_max_h), |ui| {
                 self.chats_section(ui);
             });
@@ -1971,16 +2044,73 @@ impl InxmApp {
                     }
                 }
             });
+            if let Some((version, _)) = &self.update_available {
+                // This footer lays out bottom-up: the divider separates the
+                // connection status below from the update action above.
+                ui.add_space(theme::GAP);
+                ui.separator();
+                ui.add_space(theme::GAP);
+                ui.horizontal(|ui| {
+                    ui.add_space(16.0);
+                    if update_available_chip(ui, version) {
+                        self.update_dialog_open = true;
+                    }
+                });
+            }
         });
     }
+}
+
+/// Update entry point above the sidebar connection indicators.
+fn update_available_chip(ui: &mut Ui, version: &str) -> bool {
+    const CHIP_RADIUS: u8 = 255;
+    const CHIP_PADDING: egui::Vec2 = egui::vec2(12.0, 8.0);
+    const CHIP_ICON_SIZE: f32 = 16.0;
+    const CHIP_LABEL: &str = "Update available";
+    let color = theme::text_muted();
+    let galley = ui.painter().layout_no_wrap(
+        CHIP_LABEL.to_owned(),
+        egui::FontId::proportional(theme::FONT_BODY),
+        color,
+    );
+    let size = galley.size() + CHIP_PADDING * 2.0 + vec2(CHIP_ICON_SIZE + theme::GAP, 0.0);
+    let response = ui.add(
+        egui::Button::new("")
+            .min_size(size)
+            .fill(theme::surface())
+            .stroke(theme::readonly_control_stroke())
+            .corner_radius(CHIP_RADIUS),
+    );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), CHIP_LABEL)
+    });
+    let icon_rect = egui::Rect::from_center_size(
+        egui::pos2(
+            response.rect.left() + CHIP_PADDING.x + CHIP_ICON_SIZE / 2.0,
+            response.rect.center().y,
+        ),
+        vec2(CHIP_ICON_SIZE, CHIP_ICON_SIZE),
+    );
+    widgets::paint_icon(ui.painter(), icon_rect, Icon::Download, color);
+    ui.painter().galley(
+        egui::pos2(
+            icon_rect.right() + theme::GAP,
+            response.rect.center().y - galley.size().y / 2.0,
+        ),
+        galley,
+        color,
+    );
+    response
+        .on_hover_text(format!(
+            "Version {version} is available. Review and install the update."
+        ))
+        .clicked()
 }
 
 /// Trailing indicator on a navigation row.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum NavBadge {
     None,
-    /// Unobtrusive dot — an update is available (Settings).
-    Dot,
     /// "N running" pill with a pulsing dot (Runs). Only constructed while
     /// N > 0; the badge disappears entirely when nothing is running.
     Running(usize),
@@ -2052,12 +2182,6 @@ fn nav_item(
         );
         match badge {
             NavBadge::None => {}
-            NavBadge::Dot => {
-                // Unobtrusive dot signaling an available update — deliberately
-                // not a pulsing/attention-grabbing indicator.
-                let dot_center = egui::pos2(rect.right() - 14.0, rect.top() + 10.0);
-                painter.circle_filled(dot_center, 3.5, theme::accent());
-            }
             NavBadge::Running(count) => {
                 // "N running" pill: pulsing amber dot + count, right-aligned.
                 // This one *is* attention-grabbing on purpose — it answers
@@ -2272,6 +2396,13 @@ impl eframe::App for InxmApp {
             self.refresh_plans_overview();
         }
         self.autosave_chat();
+        self.update_controller.poll();
+        if self.update_controller.ready_to_install() {
+            match self.persist_update_drafts() {
+                Ok(()) => self.update_controller.install(&self.paths.data_dir, ctx),
+                Err(error) => self.update_controller.failure(error),
+            }
+        }
 
         // Cross-view fade: restart the clock whenever the view changes.
         let now = ctx.input(|i| i.time);
@@ -2324,10 +2455,15 @@ impl eframe::App for InxmApp {
             );
         }
 
+        let inspector_open = inspector::is_open(ctx);
+        if inspector::show(ctx) {
+            return;
+        }
+
         // The plan/design workspace is a full-height sidebar docked to the
         // window edge, so it renders at ctx level before the
         // central panel instead of inside the chat view's margin frame.
-        if self.view == View::Chat && !self.onboarding_active {
+        if self.view == View::Chat && !self.onboarding_active && !inspector_open {
             let chat_engine = self.engine.scoped(self.session_id.clone());
             let sources = chat::SuggestionSources {
                 plans: &self.plans.plans,
@@ -2438,6 +2574,27 @@ impl eframe::App for InxmApp {
                                         self.schedules_view.start_for_plan(&plan_id);
                                         self.navigate(View::Schedules, None);
                                     }
+                                    Some(PlansAction::InspectJson(plan_id)) => {
+                                        let result =
+                                            crate::storage::StorageRoot::open(&self.paths.data_dir)
+                                                .and_then(|storage| {
+                                                    storage.plans().load_current(&plan_id)
+                                                });
+                                        let (title, json) = match result {
+                                            Ok(plan) => (
+                                                format!(
+                                                    "Plan {} · v{}",
+                                                    plan.metadata.id, plan.metadata.version
+                                                ),
+                                                crate::plan::to_json(&plan)
+                                                    .unwrap_or_else(|error| error.to_string()),
+                                            ),
+                                            Err(error) => {
+                                                (format!("Plan {plan_id}"), error.to_string())
+                                            }
+                                        };
+                                        inspector::open(ctx, title, &json);
+                                    }
                                     Some(PlansAction::ViewAllRuns) => {
                                         // `navigate` records the origin, so
                                         // Back returns to this overview.
@@ -2478,6 +2635,25 @@ impl eframe::App for InxmApp {
                                         self.engine
                                             .send(EngineCommand::InspectRunReadOnly { run_id });
                                     }
+                                    Some(RunsAction::InspectJson(run_id)) => {
+                                        let result =
+                                            crate::storage::StorageRoot::open(&self.paths.data_dir)
+                                                .and_then(|storage| storage.runs().load(&run_id));
+                                        let (title, json) = match result {
+                                            Ok(run) => (
+                                                format!(
+                                                    "Run {} · plan {} v{}",
+                                                    run.id, run.plan_id, run.plan_version
+                                                ),
+                                                serde_json::to_string(&run)
+                                                    .unwrap_or_else(|error| error.to_string()),
+                                            ),
+                                            Err(error) => {
+                                                (format!("Run {run_id}"), error.to_string())
+                                            }
+                                        };
+                                        inspector::open(ctx, title, &json);
+                                    }
                                     Some(RunsAction::Abort { run_id }) => {
                                         self.engine.send(EngineCommand::AbortRun { run_id });
                                     }
@@ -2495,6 +2671,7 @@ impl eframe::App for InxmApp {
                                 );
                             }
                             View::Mcp => mcp::show(ui, &mut self.mcp, &self.tools, &self.engine),
+                            View::Documentation => documentation::show(ui, &mut self.documentation),
                             View::Settings => {
                                 let action = settings::show(
                                     ui,
@@ -2503,15 +2680,30 @@ impl eframe::App for InxmApp {
                                     &self.mcp_status,
                                     &self.engine,
                                     self.update_available.as_ref(),
+                                    &self.update_controller,
                                 );
-                                if action == Some(SettingsAction::RestartOnboarding) {
-                                    self.restart_onboarding();
+                                match action {
+                                    Some(SettingsAction::RestartOnboarding) => {
+                                        self.restart_onboarding()
+                                    }
+                                    Some(SettingsAction::Update(command)) => {
+                                        self.handle_update_command(command, ctx)
+                                    }
+                                    None => {}
                                 }
                             }
                         }
                     });
             });
         mcp::recovery_dialog(ctx, &mut self.mcp, &self.engine);
+        if let Some(command) = settings::update_dialog(
+            ctx,
+            &mut self.update_dialog_open,
+            self.update_available.as_ref(),
+            &self.update_controller,
+        ) {
+            self.handle_update_command(command, ctx);
+        }
     }
 }
 
@@ -2820,8 +3012,14 @@ mod shell_tests {
     }
 
     #[test]
-    fn agent_mode_exposes_only_plans_runs_mcp_and_settings() {
-        for view in [View::Plans, View::Runs, View::Mcp, View::Settings] {
+    fn agent_mode_exposes_plans_runs_mcp_settings_and_documentation() {
+        for view in [
+            View::Plans,
+            View::Runs,
+            View::Mcp,
+            View::Settings,
+            View::Documentation,
+        ] {
             assert!(view_available(view, true), "view {view:?}");
         }
         for view in [View::Chat, View::Schedules] {
@@ -2838,6 +3036,7 @@ mod shell_tests {
             View::Schedules,
             View::Mcp,
             View::Settings,
+            View::Documentation,
         ] {
             assert!(view_available(view, false), "view {view:?}");
         }

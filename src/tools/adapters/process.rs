@@ -25,14 +25,84 @@ static MISSING_INTERPRETER: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r#"env: ['‘"]?([^\s'’":]+)['’"]?: No such file or directory"#).expect("valid regex")
 });
 
+/// Windows launcher extensions used when PATHEXT is not configured.
+const DEFAULT_WINDOWS_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+
+/// Select a launcher using the same PATH/PATHEXT and working directory as its child.
+pub(super) fn resolve_command(
+    program: &str,
+    env: &indexmap::IndexMap<String, String>,
+    working_dir: Option<&std::path::Path>,
+    tool_label: &str,
+) -> Result<std::ffi::OsString, crate::error::ToolError> {
+    let path = std::path::Path::new(program);
+    if path.is_absolute() {
+        return Ok(path.as_os_str().to_owned());
+    }
+    let override_value = |name: &str| {
+        env.iter()
+            .rev()
+            .find(|(key, _)| {
+                if cfg!(windows) {
+                    key.eq_ignore_ascii_case(name)
+                } else {
+                    key.as_str() == name
+                }
+            })
+            .map(|(_, value)| value)
+    };
+    let path_override = override_value("PATH");
+    let pathext_override = if cfg!(windows) {
+        override_value("PATHEXT")
+    } else {
+        None
+    };
+    let is_relative_path = program.contains('/') || (cfg!(windows) && program.contains('\\'));
+    if path_override.is_none() && pathext_override.is_none() && !is_relative_path {
+        return Ok(crate::hostenv::resolve_program(program).into_os_string());
+    }
+    let current_dir = std::env::current_dir().map_err(crate::error::ToolError::Io)?;
+    let child_dir = working_dir.map_or(current_dir.clone(), |dir| current_dir.join(dir));
+    if is_relative_path {
+        return Ok(child_dir.join(path).into_os_string());
+    }
+    let effective_path = path_override
+        .map(std::ffi::OsString::from)
+        .or_else(crate::hostenv::augmented_path)
+        .unwrap_or_default();
+    // Relative PATH entries (including empty entries) are relative to the child's directory.
+    let absolute_dirs = std::env::split_paths(&effective_path).map(|dir| child_dir.join(dir));
+    let effective_path = std::env::join_paths(absolute_dirs).map_err(|error| {
+        crate::error::ToolError::Execution {
+            tool: tool_label.to_owned(),
+            message: format!("cannot encode the tool's PATH: {error}"),
+        }
+    })?;
+    let pathext = if cfg!(windows) {
+        Some(
+            pathext_override
+                .map(std::ffi::OsString::from)
+                .or_else(|| std::env::var_os("PATHEXT"))
+                .unwrap_or_else(|| DEFAULT_WINDOWS_PATHEXT.into()),
+        )
+    } else {
+        None
+    };
+    crate::hostenv::find_program_in_path(program, &effective_path, pathext.as_deref())
+        .map(std::path::PathBuf::into_os_string)
+        .ok_or_else(|| crate::error::ToolError::Execution {
+            tool: tool_label.to_owned(),
+            message: format!("executable '{program}' was not found in the tool's explicit PATH/PATHEXT; check its environment overrides"),
+        })
+}
+
 /// An actionable hint when a child's stderr shows it is missing part of the
 /// user's environment.
 pub(super) fn environment_hint(stderr: &str) -> Option<String> {
     if let Some(captures) = MISSING_INTERPRETER.captures(stderr) {
         return Some(format!(
-            "hint: `{}` is not on the PATH this tool runs with. Add its directory to PATH in \
-             your shell profile and restart INXM Local, or set PATH in this tool's environment \
-             variables.",
+            "hint: `{}` is not on the PATH this tool runs with. Add its directory in Settings → Extra executable folders, \
+             fully quit and reopen INXM Local, or set PATH in this tool's environment variables.",
             &captures[1]
         ));
     }
@@ -128,6 +198,88 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_path_selects_only_configured_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin with spaces");
+        std::fs::create_dir(&bin).unwrap();
+        let program = if cfg!(windows) {
+            "override-tool.exe"
+        } else {
+            "override-tool"
+        };
+        let executable = bin.join(program);
+        std::fs::write(&executable, "").unwrap();
+        let env = [("PATH".to_owned(), bin.to_string_lossy().into_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            resolve_command(program, &env, None, "test").unwrap(),
+            executable.into_os_string()
+        );
+        let global_program = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        assert!(
+            resolve_command(global_program, &env, None, "test")
+                .unwrap_err()
+                .to_string()
+                .contains("explicit PATH")
+        );
+    }
+
+    #[test]
+    fn relative_path_entries_use_child_working_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let executable = bin.join("relative-tool");
+        std::fs::write(&executable, "").unwrap();
+        let env = [("PATH".to_owned(), "bin".to_owned())]
+            .into_iter()
+            .collect();
+        assert_eq!(
+            resolve_command("relative-tool", &env, Some(temp.path()), "test").unwrap(),
+            executable.into_os_string()
+        );
+        assert_eq!(
+            resolve_command("./local-tool", &env, Some(temp.path()), "test").unwrap(),
+            temp.path().join("./local-tool").into_os_string()
+        );
+    }
+
+    #[test]
+    fn empty_override_keeps_absolute_launcher_unchanged() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("absolute-tool");
+        let env = [("PATH".to_owned(), String::new())].into_iter().collect();
+        assert_eq!(
+            resolve_command(executable.to_str().unwrap(), &env, None, "test").unwrap(),
+            executable.into_os_string()
+        );
+        let global_program = if cfg!(windows) { "cmd.exe" } else { "sh" };
+        assert!(resolve_command(global_program, &env, None, "test").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_and_pathext_overrides_are_case_insensitive() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("override-tool.cmd");
+        std::fs::write(&executable, "").unwrap();
+        let env = [
+            (
+                "Path".to_owned(),
+                temp.path().to_string_lossy().into_owned(),
+            ),
+            ("PathExt".to_owned(), ".CMD".to_owned()),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            resolve_command("override-tool", &env, None, "test").unwrap(),
+            executable.into_os_string()
+        );
+    }
 
     #[test]
     fn hints_missing_shebang_interpreter_in_bsd_and_gnu_forms() {

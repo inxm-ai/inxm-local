@@ -17,6 +17,7 @@ The Settings view persists these `settings.json` fields:
 | `api_key` | API key entered in the app; empty uses the backend environment variable |
 | `api_base` | Base URL for compatible or Vertex connections |
 | `executable` | Executable override for CLI-backed connections |
+| `extra_executable_dirs` | Ordered absolute folders prepended to the process `PATH` at startup; defaults to `[]` |
 | `command_template` | Custom CLI command; `{{PROMPT}}` marks the prompt position |
 | `custom_cli_agentic` | Allows the experimental agent step for an explicitly agentic custom CLI |
 | `experimental_agent_calls` | Enables `AGENT_CALL` steps for supported account CLIs or agentic custom CLIs |
@@ -49,6 +50,22 @@ Other fields control theme, update checks, onboarding state, and Codex sandbox b
 | `OPENAI_API_KEY` | API-key fallback for OpenAI when the backend is automatic or API-backed |
 
 ## Tool environment
+
+### Extra executable folders
+
+If an installed command such as `gh` is unavailable to INXM Local, open
+**Settings -> Extra executable folders** and add the folder containing it.
+Folders are searched in the displayed order, before the imported or inherited
+`PATH`. Use the reorder controls to change precedence and remove folders you no
+longer need. The app rejects relative paths and paths that cannot be encoded in
+the platform `PATH`, and warns about missing directories.
+
+Settings displays the effective process `PATH` and the resolved location of
+`gh`. Save your changes, then **fully quit and reopen** the app. Closing to the
+tray is insufficient. Desktop, headless, and MCP-only starts use the same saved
+folders before detecting available programs. Compiler and repair context see
+that environment too; repair does not install software or silently change it.
+An explicit tool or MCP server `PATH` remains authoritative.
 
 Subprocess tools, Local stdio MCP servers, AI-generated code steps, and agent CLIs run as programs on your machine. Each program always receives:
 

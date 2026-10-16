@@ -154,6 +154,35 @@ The Unix flags and Windows switches below perform the same registration. Existin
 
 See [Use INXM Local with coding agents](../user-guide/coding-agents.md) for the complete guide.
 
+## Update an existing installation
+
+The desktop app checks stable GitHub releases at startup when enabled, and you
+can check manually in Settings. Checking never installs an update. Choose
+**Download and install** to confirm installation of the available release.
+Progress, cancellation, and retry controls appear in Settings.
+
+The app selects a package for your operating system, architecture, and install
+type, and verifies its SHA-256 against that release asset's GitHub digest before
+installation. A missing asset or digest, corrupt download, unsupported install,
+or permission failure leaves the existing installation in place and offers a
+manual-update link. Publisher signing is not part of this verification.
+
+Before installation, INXM Local pauses new runs, scheduled starts, and compiler
+work across desktop and MCP processes using the same installation, including
+processes with different data directories. Existing
+work must finish first; retry once it finishes or cancel to resume new work.
+Unsent chat drafts are saved before installation and exit.
+
+On macOS, updates replace the complete app bundle transactionally. Windows
+updates launch the setup installer for the current installation. Linux per-user
+updates replace the installed files transactionally; `.deb` installations launch
+the package installer, which may request administrator authorization. Installer
+handoffs wait for INXM Local to fully exit, verify the downloaded file again,
+and reopen the app with the same launch arguments after successful installation.
+Follow installer prompts where shown. User data and existing preferences stay in place.
+Choose **Restart now** or **Restart later** after installation; new work remains
+paused until the app exits. Headless processes do not initiate updates.
+
 <h2>What's next</h2>
 
 - [Create your first workflow](first-workflow.md) and turn a natural-language request into a saved plan.

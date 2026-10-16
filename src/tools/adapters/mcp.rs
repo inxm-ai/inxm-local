@@ -245,7 +245,12 @@ async fn run_stdio_session<T>(
     ) -> Pin<Box<dyn Future<Output = Result<T, ToolError>> + Send + 'a>>,
 ) -> Result<T, ToolError> {
     // PATH/PATHEXT-aware resolution: finds `npx.cmd`/`uvx.exe` on Windows.
-    let mut command = Command::new(crate::hostenv::resolve_program(server_command));
+    let mut command = Command::new(crate::tools::adapters::process::resolve_command(
+        server_command,
+        server_env,
+        None,
+        tool_label,
+    )?);
     // A shebang such as `#!/usr/bin/env node` searches the child's PATH; Server env still wins.
     if let Some(path) = crate::hostenv::augmented_path() {
         command.env("PATH", path);
@@ -1077,6 +1082,41 @@ mod tests {
             error.contains("hint: `inxm-missing-interpreter-xyz` is not on the PATH"),
             "{error}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn explicit_server_path_selects_launcher_and_rejects_global_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        write_executable(
+            &temp.path().join("override-server"),
+            "#!/bin/sh\necho override-selected >&2\n",
+        );
+        let transport = McpTransport::Stdio {
+            server_command: "override-server".to_owned(),
+            server_args: Vec::new(),
+            server_env: [(
+                "PATH".to_owned(),
+                temp.path().to_string_lossy().into_owned(),
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let error = list_tools(&transport, Some(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("override-selected"), "{error}");
+        let transport = McpTransport::Stdio {
+            server_command: "sh".to_owned(),
+            server_args: Vec::new(),
+            server_env: [("PATH".to_owned(), String::new())].into_iter().collect(),
+        };
+        let error = list_tools(&transport, Some(5))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("explicit PATH"), "{error}");
     }
 
     #[cfg(unix)]
