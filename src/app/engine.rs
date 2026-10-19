@@ -1233,6 +1233,8 @@ pub enum EngineEvent {
     Assistant(String),
     /// An operation failed — rendered as an error bubble.
     Failure(String),
+    /// A desktop plan import failed; the Plans view presents the error there.
+    PlanImportFailed(String),
     CompileStarted {
         intent: String,
     },
@@ -3051,6 +3053,7 @@ fn command_failure_event(
         "save_tool" | "rename_tool" | "bulk_save_tools" => {
             EngineEvent::CatalogMutationFailed(message)
         }
+        "import_plan" => EngineEvent::PlanImportFailed(message),
         "mcp_oauth_status" | "mcp_oauth_begin" | "mcp_oauth_cancel" | "mcp_oauth_disconnect" => {
             match mcp_tool_name {
                 Some(tool_name) => EngineEvent::McpOAuthOperationFailed { tool_name, message },
@@ -5047,6 +5050,15 @@ async fn import_plan(
             })?
     };
 
+    let unavailable_tools = unavailable_plan_tools(&bundle.tools, &updated_catalog);
+    if !unavailable_tools.is_empty() {
+        anyhow::bail!(
+            "The plan uses tools that are missing or disabled in your local MCP Tools catalog: {}. \
+             Add or configure them and allowlist them, then retry the import",
+            unavailable_tools.join(", ")
+        );
+    }
+
     let plan = bundle.plan;
 
     let errors = validator::validate(&plan, &updated_catalog);
@@ -5103,6 +5115,18 @@ async fn import_plan(
     announce_catalog(env);
     env.emit(EngineEvent::PlanList(list_plans(env)?));
     Ok(())
+}
+
+fn unavailable_plan_tools(tools: &[ToolReference], catalog: &ToolCatalog) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|tool| {
+            !catalog
+                .get(&tool.name)
+                .is_some_and(|entry| entry.allowlisted)
+        })
+        .map(|tool| tool.name.clone())
+        .collect()
 }
 
 /// Resolve a same-name import and persist it while holding the one app-wide
@@ -7382,6 +7406,32 @@ tools:
                 EngineEvent::Failure(_)
             ));
         }
+        assert!(matches!(
+            command_failure_event("import_plan", None, "missing tool: echo".to_owned()),
+            EngineEvent::PlanImportFailed(message) if message == "missing tool: echo"
+        ));
+    }
+
+    #[test]
+    fn unavailable_plan_tools_names_missing_and_disabled_entries() {
+        let mut disabled = named_http_tool("disabled");
+        disabled.allowlisted = false;
+        let catalog = ToolCatalog::new(vec![named_http_tool("enabled"), disabled]);
+        let tools = ["enabled", "missing", "disabled"]
+            .into_iter()
+            .map(|name| ToolReference {
+                name: name.to_owned(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: serde_json::json!({"type": "object"}),
+                kind_hint: None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            unavailable_plan_tools(&tools, &catalog),
+            vec!["missing".to_owned(), "disabled".to_owned()]
+        );
     }
 
     #[test]
