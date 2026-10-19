@@ -14,3 +14,8 @@ Linux, Windows, and macOS.
   (© Bitstream, Inc.) with public-domain additions.
   [License](https://dejavu-fonts.github.io/License.html) permits
   redistribution and bundling.
+- **NotoEmoji-Subset.ttf** — Noto Emoji by Google (© 2013 Google LLC), fixed at the
+  regular weight and subset to the Unicode emoji blocks so documentation emoji
+  render in a single monochrome style on every platform. Licensed under the
+  [SIL Open Font License 1.1](https://openfontlicense.org); the license text
+  is in `NotoEmoji-OFL.txt`.

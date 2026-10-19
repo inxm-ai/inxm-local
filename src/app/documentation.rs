@@ -153,30 +153,42 @@ pub fn show(ui: &mut Ui, state: &mut DocumentationState) {
         }
         ui.separator();
     }
-    ui.horizontal(|ui| {
-        if ui
-            .add_enabled(!state.history.is_empty(), egui::Button::new("Back"))
-            .clicked()
-            && let Some(destination) = state.history.pop()
-        {
-            state.page = destination.page;
-            state.pending_scroll = Some(destination.anchor.clone());
-            state.location = destination;
-        }
-        egui::ComboBox::from_id_salt("documentation_navigation")
-            .selected_text(DOC_PAGES[state.page].0)
-            .show_ui(ui, |ui| {
-                for (page, (title, _, _)) in DOC_PAGES.iter().enumerate() {
-                    if ui.selectable_label(page == state.page, *title).clicked() {
-                        state.navigate(Destination {
-                            page,
-                            anchor: String::new(),
-                        });
+    // A fixed-height, vertically centered row so Back, the dropdown and the
+    // link share one line instead of drifting by their differing heights.
+    let row_height = (ui.text_style_height(&egui::TextStyle::Button)
+        + ui.spacing().button_padding.y * 2.0)
+        .max(ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), row_height),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            // ComboBox centers a box of this height; a smaller one pushes the
+            // taller dropdown button below the row.
+            ui.spacing_mut().interact_size.y = row_height;
+            if ui
+                .add_enabled(!state.history.is_empty(), egui::Button::new("Back"))
+                .clicked()
+                && let Some(destination) = state.history.pop()
+            {
+                state.page = destination.page;
+                state.pending_scroll = Some(destination.anchor.clone());
+                state.location = destination;
+            }
+            egui::ComboBox::from_id_salt("documentation_navigation")
+                .selected_text(DOC_PAGES[state.page].0)
+                .show_ui(ui, |ui| {
+                    for (page, (title, _, _)) in DOC_PAGES.iter().enumerate() {
+                        if ui.selectable_label(page == state.page, *title).clicked() {
+                            state.navigate(Destination {
+                                page,
+                                anchor: String::new(),
+                            });
+                        }
                     }
-                }
-            });
-        ui.hyperlink_to("Open online", online_url(DOC_PAGES[state.page].1));
-    });
+                });
+            ui.hyperlink_to("Open online", online_url(DOC_PAGES[state.page].1));
+        },
+    );
     let (_, path, content) = DOC_PAGES[state.page];
     let pending = state.pending_scroll.take();
     widgets::scroll_area_vertical()
@@ -291,9 +303,8 @@ fn parsed_blocks(content: &str) -> Vec<DocumentBlock> {
                     .pieces
                     .push((text.into_string(), bold, italic, link.clone()))
             }
-            Event::SoftBreak | Event::HardBreak => {
-                block.pieces.push(("\n".to_owned(), false, false, None))
-            }
+            Event::SoftBreak => block.pieces.push((" ".to_owned(), false, false, None)),
+            Event::HardBreak => block.pieces.push(("\n".to_owned(), false, false, None)),
             Event::End(TagEnd::Strong) => bold = false,
             Event::End(TagEnd::Emphasis) => italic = false,
             Event::End(TagEnd::Link) => link = None,
@@ -365,8 +376,13 @@ fn draw_block(ui: &mut Ui, block: &Block, path: &str) -> Option<Destination> {
         });
     } else {
         ui.horizontal_wrapped(|ui| {
+            // Pieces are separate widgets but already carry their own spaces;
+            // egui's default item spacing would double every gap around a
+            // link, italic or inline code span.
+            ui.spacing_mut().item_spacing.x = 0.0;
             if block.list {
                 ui.label("•");
+                ui.add_space(theme::GAP_SMALL);
             }
             for (text, bold, italic, link) in &block.pieces {
                 let mut rich = RichText::new(text).color(theme::text());
@@ -391,6 +407,7 @@ fn draw_block(ui: &mut Ui, block: &Block, path: &str) -> Option<Destination> {
                     );
                 }
                 if let Some(href) = link {
+                    rich = rich.color(theme::accent()).underline();
                     if let Some(target) = link_destination(path, href) {
                         if ui.link(rich).clicked() {
                             destination = Some(target);
@@ -469,6 +486,20 @@ mod tests {
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>()
         );
+    }
+    #[test]
+    fn soft_wrapped_source_lines_join_into_one_paragraph_line() {
+        let blocks = parsed_blocks("Send with\nCmd+Enter, or a [link](a.md)  \nnext");
+        let [DocumentBlock::Text(block)] = blocks.as_slice() else {
+            panic!("expected one paragraph, got {blocks:?}");
+        };
+        let text = block
+            .pieces
+            .iter()
+            .map(|(text, _, _, _)| text.as_str())
+            .collect::<String>();
+        // A soft break is a space; only an explicit hard break forces a newline.
+        assert_eq!(text, "Send with Cmd+Enter, or a link\nnext");
     }
     #[test]
     fn relative_navigation_and_fragments_stay_local() {
