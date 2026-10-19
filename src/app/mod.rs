@@ -1446,7 +1446,6 @@ impl InxmApp {
                 }
             }
             EngineEvent::RunList(items) => {
-                self.runs_view.reconcile_runs(&items);
                 if self.chat.expect_run_index {
                     self.chat.expect_run_index = false;
                     self.chat
@@ -1699,6 +1698,13 @@ impl InxmApp {
     }
 
     fn handle_routed_event(&mut self, routed: RoutedEngineEvent) {
+        if let EngineEvent::RunList(items) = &routed.event {
+            self.runs_view.reconcile_runs(items);
+            self.chat.reconcile_runs(items);
+            for parked in self.parked_chats.values_mut() {
+                parked.chat.reconcile_runs(items);
+            }
+        }
         let focus_target = routed.session_id.is_some()
             && matches!(
                 &routed.event,
@@ -3021,6 +3027,94 @@ mod shell_tests {
         assert!(app.nav_history.is_empty());
         assert!(chat_store::load(&app.paths.data_dir, &deleted_id).is_err());
         assert!(chat_store::load(&app.paths.data_dir, &active_id).is_ok());
+    }
+
+    #[test]
+    fn run_list_reconciles_current_and_parked_workspaces_before_session_routing() {
+        for routed_to_parked_chat in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let mut app = test_app(DataPaths::at(tmp.path().to_owned()));
+            let deleted = finished_run(RunStatus::Succeeded);
+            let remaining = finished_run(RunStatus::Succeeded);
+            app.chat.push(
+                Role::Assistant,
+                MessageBody::RunCompleted {
+                    run_id: deleted.id.clone(),
+                    text: "Historical result".to_owned(),
+                },
+            );
+            app.chat.workspace_run = Some(chat::binding_from_run(&deleted));
+            app.chat.reveal_run_details = true;
+            let active_session = app.session_id.clone();
+            let mut parked_chat = ChatState::default();
+            parked_chat.workspace_run = Some(chat::binding_from_run(&deleted));
+            parked_chat.reveal_run_details = true;
+            parked_chat.expect_run_index = true;
+            parked_chat.push(Role::User, MessageBody::Text("Parked chat".to_owned()));
+            app.parked_chats.insert(
+                "parked".to_owned(),
+                ParkedChat {
+                    saved_fingerprint: chat_store::fingerprint(&parked_chat),
+                    chat: parked_chat,
+                    created_at: chrono::Utc::now(),
+                },
+            );
+            let mut retained_chat = ChatState::default();
+            retained_chat.workspace_run = Some(chat::binding_from_run(&remaining));
+            retained_chat.reveal_run_details = true;
+            app.parked_chats.insert(
+                "retained".to_owned(),
+                ParkedChat {
+                    saved_fingerprint: chat_store::fingerprint(&retained_chat),
+                    chat: retained_chat,
+                    created_at: chrono::Utc::now(),
+                },
+            );
+            app.runs_view.inspected = Some(Box::new(deleted));
+
+            app.handle_routed_event(RoutedEngineEvent {
+                session_id: routed_to_parked_chat.then(|| "parked".to_owned()),
+                event: EngineEvent::RunList(vec![engine::RunListItem {
+                    id: remaining.id.clone(),
+                    plan_id: remaining.plan_id.clone(),
+                    plan_name: "Plan".to_owned(),
+                    status: remaining.status.clone(),
+                    started_at: remaining.started_at,
+                    finished_at: remaining.finished_at,
+                    source: None,
+                }]),
+            });
+
+            assert_eq!(app.session_id, active_session);
+            assert!(app.chat.workspace_run.is_none());
+            assert!(!app.chat.reveal_run_details);
+            assert!(matches!(
+                &app.chat.messages[0].body,
+                MessageBody::RunCompleted { text, .. } if text == "Historical result"
+            ));
+            assert!(app.runs_view.inspected.is_none());
+            let parked = &app.parked_chats["parked"].chat;
+            assert!(parked.workspace_run.is_none());
+            assert!(!parked.reveal_run_details);
+            let retained = &app.parked_chats["retained"].chat;
+            assert_eq!(
+                retained.workspace_run.as_ref().unwrap().run_id,
+                remaining.id
+            );
+            assert!(retained.reveal_run_details);
+            if routed_to_parked_chat {
+                assert!(matches!(
+                    &parked.messages.last().unwrap().body,
+                    MessageBody::RunIndex(items) if items.len() == 1
+                ));
+            }
+
+            app.open_chat("parked");
+
+            assert_eq!(app.session_id, "parked");
+            assert!(app.chat.workspace_run.is_none());
+            assert!(!app.chat.reveal_run_details);
+        }
     }
 
     #[test]
