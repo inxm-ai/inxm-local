@@ -31,6 +31,15 @@ The server accepts MCP JSON-RPC requests for `initialize`, `ping`, `tools/list`,
 | `delete_schedule` | Delete a schedule |
 | `set_schedule_enabled` | Enable or disable a schedule |
 
+## Import plan bundles
+
+`export_plan` saves a JSON bundle under the application's exports directory and reports its relative path and any tool references that were already missing from the exporting catalog. The bundle includes the plan and tool references, not machine-local tool configurations or credentials.
+
+!!! note
+    `import_plan` accepts the bundle as an inline JSON object in its `bundle` argument; it does not read a file path. All tools referenced by the plan must already be present in the receiving application's local tool catalog. If any are missing, import fails and identifies them. Add and configure those tools first, including any MCP server connection and credentials, then retry. MCP import does not synthesize missing tool entries.
+
+The optional `on_conflict` argument controls what happens when a plan with the same name exists: `reject` (the default), `new_version`, or `duplicate`.
+
 ## Execute a plan
 
 Call `execute_plan` with a plan reference and an input object:
