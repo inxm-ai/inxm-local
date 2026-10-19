@@ -25,6 +25,8 @@ const CHART_WINDOW_DAYS: i64 = 14;
 pub struct PlansState {
     pub plans: Vec<PlanListItem>,
     pub runs: Vec<RunListItem>,
+    /// Most recent plan import failure, shown in the Plans view.
+    pub import_error: Option<String>,
     /// Plan id awaiting delete confirmation (two-click delete).
     pub confirm_delete: Option<String>,
     /// Prompt-only preflight; the engine performs the definitive collision
@@ -71,6 +73,7 @@ pub fn show(
     agent_mode: bool,
 ) -> Option<PlansAction> {
     let mut action = None;
+    let mut dismiss_import_error = false;
 
     widgets::scroll_area_vertical()
         .auto_shrink([false, false])
@@ -90,6 +93,7 @@ pub fn show(
                             .set_title("Import a plan")
                             .pick_file()
                     {
+                        state.import_error = None;
                         let collision_name = crate::plan::bundle::PlanBundle::load_from_file(&path)
                             .ok()
                             .map(|bundle| bundle.plan.name)
@@ -108,6 +112,39 @@ pub fn show(
                 });
             });
             ui.add_space(8.0);
+
+            if let Some(message) = state.import_error.as_deref() {
+                theme::card_frame()
+                    .stroke(Stroke::new(1.0_f32, theme::err()))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Plan import failed")
+                                    .strong()
+                                    .color(theme::err()),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if widgets::ghost_button(ui, "Dismiss").clicked() {
+                                    dismiss_import_error = true;
+                                }
+                            });
+                        });
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(message).color(theme::text()),
+                        );
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(
+                                "If the message names a tool, set it up or enable it under MCP Tools, then retry.",
+                            )
+                            .size(theme::FONT_SMALL)
+                            .color(theme::text_muted()),
+                        );
+                    });
+                ui.add_space(8.0);
+            }
 
             if state.plans.is_empty() {
                 ui.label(
@@ -285,6 +322,10 @@ pub fn show(
             }
             ui.add_space(12.0);
         });
+
+    if dismiss_import_error {
+        state.import_error = None;
+    }
 
     let mut import_choice = None;
     if let Some(collision) = state.import_collision.as_ref() {
