@@ -1439,6 +1439,7 @@ impl InxmApp {
                 }
             }
             EngineEvent::RunList(items) => {
+                self.runs_view.reconcile_runs(&items);
                 if self.chat.expect_run_index {
                     self.chat.expect_run_index = false;
                     self.chat

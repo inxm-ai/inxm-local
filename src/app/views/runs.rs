@@ -50,6 +50,19 @@ pub struct RunsState {
     pub confirm_delete: Option<String>,
 }
 
+impl RunsState {
+    /// Close the inspector only after a refreshed list confirms the run is gone.
+    pub(crate) fn reconcile_runs(&mut self, runs: &[RunListItem]) {
+        if self
+            .inspected
+            .as_ref()
+            .is_some_and(|inspected| !runs.iter().any(|run| run.id == inspected.id))
+        {
+            self.inspected = None;
+        }
+    }
+}
+
 /// Actions the shell must react to (navigation / engine commands).
 #[derive(Debug, Clone, PartialEq)]
 pub enum RunsAction {
@@ -738,6 +751,48 @@ mod tests {
             failed_step_id: "step".to_owned(),
             message: message.to_owned(),
         }
+    }
+
+    #[test]
+    fn refreshed_runs_clear_inspector_when_inspected_run_was_deleted() {
+        let inspected = crate::executor::Run::new("a", 1);
+        let mut state = RunsState {
+            inspected: Some(Box::new(inspected)),
+            ..Default::default()
+        };
+        let other = run("b", RunStatus::Succeeded, chrono::Utc::now(), None);
+
+        state.reconcile_runs(&[other]);
+
+        assert!(state.inspected.is_none());
+    }
+
+    #[test]
+    fn empty_run_list_clears_inspector_after_last_run_is_deleted() {
+        let mut state = RunsState {
+            inspected: Some(Box::new(crate::executor::Run::new("a", 1))),
+            ..Default::default()
+        };
+
+        state.reconcile_runs(&[]);
+
+        assert!(state.inspected.is_none());
+    }
+
+    #[test]
+    fn refreshed_runs_preserve_inspector_while_inspected_run_still_exists() {
+        let inspected = crate::executor::Run::new("a", 1);
+        let inspected_id = inspected.id.clone();
+        let mut remaining = run("a", RunStatus::Succeeded, chrono::Utc::now(), None);
+        remaining.id = inspected_id.clone();
+        let mut state = RunsState {
+            inspected: Some(Box::new(inspected)),
+            ..Default::default()
+        };
+
+        state.reconcile_runs(&[remaining]);
+
+        assert_eq!(state.inspected.as_ref().unwrap().id, inspected_id);
     }
 
     #[test]
