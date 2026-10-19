@@ -1080,9 +1080,16 @@ impl InxmApp {
         }
         chat_store::delete(&self.paths.data_dir, session_id);
         self.parked_chats.remove(session_id);
+        self.nav_history
+            .retain(|target| target.session_id.as_deref() != Some(session_id));
         self.sessions = chat_store::list(&self.paths.data_dir);
         if session_id == self.session_id {
-            self.new_chat();
+            self.chat = ChatState::default();
+            self.session_id = uuid::Uuid::new_v4().to_string();
+            self.session_created_at = chrono::Utc::now();
+            self.last_saved_fingerprint = chat_store::fingerprint(&self.chat);
+            let new_session_id = self.session_id.clone();
+            self.navigate(View::Chat, Some(&new_session_id));
         }
     }
 
@@ -2902,6 +2909,119 @@ mod shell_tests {
     use crate::executor::{
         AgentTranscriptEvent, AgentTranscriptStream, ProgressEvent, Run, RunStatus, StepRunStatus,
     };
+
+    fn test_app(paths: DataPaths) -> InxmApp {
+        let (engine, events) = engine::spawn(egui::Context::default(), paths.clone());
+        let (_, mcp_status_rx) = std::sync::mpsc::channel();
+        let chat = ChatState::default();
+        let last_saved_fingerprint = chat_store::fingerprint(&chat);
+        InxmApp {
+            engine,
+            activities: ActivityRegistry::default(),
+            events,
+            paths,
+            view: View::Chat,
+            last_view: View::Chat,
+            view_switched_at: 0.0,
+            nav_history: Vec::new(),
+            chat,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            session_created_at: chrono::Utc::now(),
+            parked_chats: Default::default(),
+            pending_chat_delete: None,
+            sessions: Vec::new(),
+            last_saved_fingerprint,
+            run_sessions: Default::default(),
+            last_run_refresh: std::time::Instant::now(),
+            plans: PlansState::default(),
+            runs_view: RunsState::default(),
+            schedules_view: SchedulesState::default(),
+            mcp: McpState::default(),
+            settings: SettingsState::default(),
+            documentation: documentation::DocumentationState::default(),
+            mcp_status: mcp_server::ServerStatus::Starting { port: 0 },
+            mcp_status_rx,
+            tools: Vec::new(),
+            patches: Vec::new(),
+            schedules: Vec::new(),
+            data_dir: String::new(),
+            backend: None,
+            environment: String::new(),
+            shot: debug_shot::ShotState::from_env(),
+            update_available: None,
+            update_controller: update_controller::UpdateController::default(),
+            update_dialog_open: false,
+            tray: None,
+            tray_icon_dark: false,
+            quit_requested: Default::default(),
+            onboarding_active: false,
+            onboarding: OnboardingState::new(),
+            onboarding_telemetry_opt_in: false,
+            sidebar_collapsed: false,
+            agent_mode: false,
+            view_time_anchor: None,
+        }
+    }
+
+    #[test]
+    fn deleting_active_chat_does_not_save_park_or_restore_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app(DataPaths::at(tmp.path().to_owned()));
+        app.chat
+            .push(Role::User, MessageBody::Text("Saved".to_owned()));
+        app.autosave_chat();
+        let deleted_id = app.session_id.clone();
+        app.chat.input = "Unsaved draft".to_owned();
+        app.nav_history.push(NavTarget {
+            view: View::Plans,
+            session_id: None,
+        });
+        app.nav_history.push(NavTarget {
+            view: View::Chat,
+            session_id: Some(deleted_id.clone()),
+        });
+
+        app.delete_chat(&deleted_id);
+        app.autosave_chat();
+        app.go_back();
+        app.autosave_chat();
+
+        assert_ne!(app.session_id, deleted_id);
+        assert!(app.chat.is_blank());
+        assert!(app.chat.input.is_empty());
+        assert!(!app.parked_chats.contains_key(&deleted_id));
+        assert!(chat_store::load(&app.paths.data_dir, &deleted_id).is_err());
+        assert!(chat_store::list(&app.paths.data_dir).is_empty());
+        assert_eq!(app.view, View::Plans);
+        assert!(app.nav_history.is_empty());
+    }
+
+    #[test]
+    fn deleting_parked_chat_preserves_active_chat_and_removes_stale_navigation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = test_app(DataPaths::at(tmp.path().to_owned()));
+        app.chat
+            .push(Role::User, MessageBody::Text("Delete me".to_owned()));
+        app.autosave_chat();
+        let deleted_id = app.session_id.clone();
+        app.new_chat();
+        app.chat
+            .push(Role::User, MessageBody::Text("Keep me".to_owned()));
+        app.autosave_chat();
+        let active_id = app.session_id.clone();
+        assert!(app.parked_chats.contains_key(&deleted_id));
+
+        app.delete_chat(&deleted_id);
+        app.go_back();
+        app.autosave_chat();
+
+        assert_eq!(app.session_id, active_id);
+        assert_eq!(app.chat.messages.len(), 1);
+        assert!(!app.parked_chats.contains_key(&deleted_id));
+        assert!(app.nav_history.is_empty());
+        assert!(chat_store::load(&app.paths.data_dir, &deleted_id).is_err());
+        assert!(chat_store::load(&app.paths.data_dir, &active_id).is_ok());
+    }
 
     #[test]
     fn short_path_keeps_only_the_last_two_segments() {
