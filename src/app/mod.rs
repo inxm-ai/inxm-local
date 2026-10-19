@@ -1156,6 +1156,13 @@ impl InxmApp {
                 }
                 self.chat.push(Role::Assistant, MessageBody::Error(text));
             }
+            EngineEvent::PlanImportFailed(text) => {
+                self.plans.import_error = Some(text.clone());
+                self.chat.push(
+                    Role::Assistant,
+                    MessageBody::Error(format!("Plan import failed: {text}")),
+                );
+            }
             EngineEvent::CompileStarted { intent } => {
                 self.chat.busy = Some(chat::BusyState::new(
                     "Compiling your intent into a plan…",
