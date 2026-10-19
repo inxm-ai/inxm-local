@@ -31,6 +31,8 @@ During execution, the run stores its resolved inputs and a record for each step.
 
 The run status can be successful, failed, cancelled, or waiting for human input. A `HUMAN_INTERACTION` step creates a checkpoint with either an approval decision or free-text response. The desktop app collects the response in chat; an MCP caller receives a persisted run ID and resumes that same run with the response.
 
+Deleting a run clears its selection in Runs and Chat, including chats that are not currently open. Conversation history is retained, but `/inspect` and `/repair` without an explicit run ID only select runs that still exist.
+
 ## Repairs
 
 Repair is a proposal workflow, not an automatic rewrite. After a failed run is classified, the compiler proposes a constrained patch and the user applies or rejects it. Applying a patch creates a new plan version. Resuming then resets the failed step and its downstream dependents, while preserving unrelated successful work.

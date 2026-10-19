@@ -27,7 +27,7 @@ INXM Local records Claude API calls made to the Anthropic Messages API (`api.ant
 | --- | --- |
 | Plan creation | Assessing your request, writing the design (including design corrections), and compiling (including retries after invalid JSON or failed validation), from chat or MCP |
 | Plan runs | Every `PROMPT_CALL` step, including each retry attempt and each `FAN_OUT` iteration, for new and resumed runs |
-| Plan support | Converting a schedule description to a cron expression, and generating tools (during plan import or on the Tools page) |
+| Plan support | Converting a schedule description to a cron expression, and generating tools from the MCP Tools page |
 
 Not recorded:
 
