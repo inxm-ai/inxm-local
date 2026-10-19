@@ -345,7 +345,7 @@ pub fn claude_usage_runtime_disabled() -> bool {
     !claude_usage_enabled(true)
 }
 
-/// Whether request bodies are attached to recorded calls. Read once per
+/// Whether request and response bodies are attached to recorded calls. Read once per
 /// process; warns once when enabled.
 pub fn store_claude_prompts() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -354,7 +354,7 @@ pub fn store_claude_prompts() -> bool {
             store_prompts_flag(std::env::var(STORE_CLAUDE_PROMPTS_ENV).ok().as_deref());
         if enabled {
             tracing::warn!(
-                "{STORE_CLAUDE_PROMPTS_ENV} is enabled: Claude request bodies are written to llm-usage/requests/"
+                "{STORE_CLAUDE_PROMPTS_ENV} is enabled: Claude request and response bodies are stored inline in local JSONL ledgers under llm-usage/"
             );
         }
         enabled
