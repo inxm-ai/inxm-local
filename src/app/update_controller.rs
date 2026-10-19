@@ -72,7 +72,7 @@ impl UpdateController {
             };
             let result = (|| {
                 let client = reqwest::blocking::Client::builder()
-                    .user_agent(concat!("inxm-local/", env!("CARGO_PKG_VERSION")))
+                    .user_agent(format!("inxm-local/{}", crate::version::DISPLAY))
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .map_err(|e| e.to_string())?;
@@ -85,7 +85,7 @@ impl UpdateController {
                     .json::<serde_json::Value>()
                     .map_err(|e| e.to_string())?;
                 let release = Release::from_github_value(&body)?;
-                if !super::engine::is_newer_version(&release.version, env!("CARGO_PKG_VERSION")) {
+                if !super::engine::is_newer_version(&release.version, crate::version::DISPLAY) {
                     return Err(
                         "The stable release is not newer than this installation.".to_owned()
                     );
