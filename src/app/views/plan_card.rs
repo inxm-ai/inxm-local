@@ -1043,14 +1043,14 @@ fn footer(
             });
         }
 
-        let json_open_id = card_id.with("json_open");
-        let mut json_open: bool = ui
-            .ctx()
-            .data_mut(|d| *d.get_temp_mut_or(json_open_id, false));
-        if widgets::ghost_button(ui, if json_open { "Hide JSON" } else { "JSON" }).clicked() {
-            json_open = !json_open;
-            ui.ctx()
-                .data_mut(|d| d.insert_temp(json_open_id, json_open));
+        if widgets::ghost_button(ui, "JSON").clicked() {
+            let json =
+                crate::plan::to_json(plan).unwrap_or_else(|e| format!("failed to serialise: {e}"));
+            super::super::inspector::open(
+                ui.ctx(),
+                format!("Plan {} · v{}", plan.metadata.id, plan.metadata.version),
+                &json,
+            );
         }
 
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1102,26 +1102,6 @@ fn footer(
                 instruction,
             });
         }
-    }
-
-    let json_open: bool = ui
-        .ctx()
-        .data_mut(|d| *d.get_temp_mut_or(card_id.with("json_open"), false));
-    if json_open {
-        ui.add_space(4.0);
-        let json =
-            crate::plan::to_json(plan).unwrap_or_else(|e| format!("failed to serialise: {e}"));
-        widgets::scroll_area_vertical()
-            .id_salt(card_id.with("json_scroll"))
-            .max_height(260.0)
-            .show(ui, |ui| {
-                widgets::text_edit(
-                    ui,
-                    egui::TextEdit::multiline(&mut json.as_str())
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY),
-                );
-            });
     }
 
     action
@@ -1420,6 +1400,14 @@ fn step_detail(
                 ui.vertical(|ui| {
                     ui.set_width((panel_width - 22.0).max(120.0));
 
+                    let detail_context = format!(
+                        "Plan {} · v{} · step {}{}",
+                        plan.metadata.id,
+                        plan.metadata.version,
+                        step.id,
+                        run.map(|binding| format!(" · run {}", binding.run_id))
+                            .unwrap_or_default()
+                    );
                     let config_json =
                         serde_json::to_value(&step.config).unwrap_or(serde_json::Value::Null);
 
@@ -1433,6 +1421,7 @@ fn step_detail(
                         if resolved != config_json {
                             detail_block(
                                 ui,
+                                &detail_context,
                                 row_id.with("resolved"),
                                 "Call (inputs resolved)",
                                 &pretty(&resolved),
@@ -1441,6 +1430,7 @@ fn step_detail(
                     }
                     detail_block(
                         ui,
+                        &detail_context,
                         row_id.with("call"),
                         "Call (as compiled)",
                         &pretty(&config_json),
@@ -1450,19 +1440,38 @@ fn step_detail(
                         if let Some(outputs) = binding.outputs.get(&step.id) {
                             let value =
                                 serde_json::to_value(outputs).unwrap_or(serde_json::Value::Null);
-                            detail_block(ui, row_id.with("outputs"), "Outputs", &pretty(&value));
+                            detail_block(
+                                ui,
+                                &detail_context,
+                                row_id.with("outputs"),
+                                "Outputs",
+                                &pretty(&value),
+                            );
                         }
                         if let Some(stdout) = binding.stdouts.get(&step.id) {
-                            detail_block(ui, row_id.with("stdout"), "Stdout", stdout);
+                            detail_block(
+                                ui,
+                                &detail_context,
+                                row_id.with("stdout"),
+                                "Stdout",
+                                stdout,
+                            );
                         }
                         if let Some(stderr) = binding.stderrs.get(&step.id) {
-                            detail_block(ui, row_id.with("stderr"), "Stderr", stderr);
+                            detail_block(
+                                ui,
+                                &detail_context,
+                                row_id.with("stderr"),
+                                "Stderr",
+                                stderr,
+                            );
                         }
                         if let Some(iterations) = binding.iterations.get(&step.id) {
                             let value =
                                 serde_json::to_value(iterations).unwrap_or(serde_json::Value::Null);
                             detail_block(
                                 ui,
+                                &detail_context,
                                 row_id.with("iterations"),
                                 "Fan-out iterations",
                                 &pretty(&value),
@@ -1475,13 +1484,14 @@ fn step_detail(
                         {
                             detail_block(
                                 ui,
+                                &detail_context,
                                 row_id.with("claude_calls"),
                                 "Claude calls",
                                 &crate::app::usage::step_calls_text(calls),
                             );
                         }
                         if let Some(error) = binding.errors.get(&step.id) {
-                            detail_block(ui, row_id.with("error"), "Error", error);
+                            detail_block(ui, &detail_context, row_id.with("error"), "Error", error);
                         }
                     }
                 });
@@ -1490,8 +1500,13 @@ fn step_detail(
 }
 
 /// One labelled, selectable, scrollable text block.
-fn detail_block(ui: &mut Ui, id: Id, label: &str, mut text: &str) {
-    widgets::section_label(ui, label);
+fn detail_block(ui: &mut Ui, context: &str, id: Id, label: &str, mut text: &str) {
+    ui.horizontal(|ui| {
+        widgets::section_label(ui, label);
+        if widgets::ghost_button(ui, "Inspect").clicked() {
+            super::super::inspector::open(ui.ctx(), format!("{context} · {label}"), text);
+        }
+    });
     widgets::scroll_area_vertical()
         .id_salt(id)
         .max_height(DETAIL_BLOCK_MAX_HEIGHT)

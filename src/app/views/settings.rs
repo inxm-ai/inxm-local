@@ -89,11 +89,13 @@ const CODEX_SANDBOX_MODE_CHOICES: &[(CodexSandboxMode, &str, &str)] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
     RestartOnboarding,
+    Update(crate::app::update_controller::UpdateCommand),
 }
 
 #[derive(Default)]
 pub struct SettingsState {
     pub draft: AppSettings,
+    pub executable_dir_error: Option<String>,
     /// Result of the last "Test sandbox" probe, if one has been run this session.
     pub codex_sandbox_test: Option<Result<(), String>>,
     /// Progress/result of the latest manual update check.
@@ -142,6 +144,7 @@ pub fn show(
     mcp_status: &ServerStatus,
     engine: &EngineHandle,
     update_available: Option<&(String, String)>,
+    update: &crate::app::update_controller::UpdateController,
 ) -> Option<SettingsAction> {
     let mut action = None;
     widgets::scroll_area_vertical()
@@ -686,6 +689,7 @@ pub fn show(
             ui.add_space(12.0);
             theme::card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
+                executable_folders(ui, state, engine);
                 widgets::section_label(ui, "Environment");
                 ui.add_space(2.0);
                 widgets::wrapped_label(
@@ -821,6 +825,7 @@ pub fn show(
                         .color(theme::text_muted()),
                 );
                 ui.hyperlink_to("Releases on GitHub", RELEASES_URL);
+                if let Some(command) = update_controls(ui, update, update_available.is_some()) { action = Some(SettingsAction::Update(command)); }
                 ui.add_space(8.0);
 
                 if ui
@@ -914,4 +919,203 @@ pub fn show(
             ui.add_space(12.0);
         });
     action
+}
+
+fn executable_folders(ui: &mut Ui, state: &mut SettingsState, engine: &EngineHandle) {
+    widgets::section_label(ui, "Extra executable folders");
+    widgets::wrapped_label(ui, RichText::new("Folders are searched in this order before your inherited PATH. Fully quit and reopen INXM Local after changes; closing to the tray does not restart it.").color(theme::text_muted()));
+    let mut change = None;
+    for (index, folder) in state.draft.extra_executable_dirs.iter().enumerate() {
+        ui.horizontal(|ui| {
+            ui.label(folder);
+            if !std::path::Path::new(folder).is_dir() {
+                ui.label(RichText::new("Missing directory").color(theme::warn()));
+            }
+            if ui.add_enabled(index > 0, egui::Button::new("↑")).clicked() {
+                change = Some((index, Some(index - 1)));
+            }
+            if ui
+                .add_enabled(
+                    index + 1 < state.draft.extra_executable_dirs.len(),
+                    egui::Button::new("↓"),
+                )
+                .clicked()
+            {
+                change = Some((index, Some(index + 1)));
+            }
+            if widgets::ghost_button(ui, "Remove").clicked() {
+                change = Some((index, None));
+            }
+        });
+    }
+    let mut changed = false;
+    if let Some((index, destination)) = change {
+        match destination {
+            Some(destination) => state.draft.extra_executable_dirs.swap(index, destination),
+            None => {
+                state.draft.extra_executable_dirs.remove(index);
+            }
+        }
+        changed = true;
+    }
+    if widgets::ghost_button(ui, "Add folder…").clicked()
+        && let Some(folder) = rfd::FileDialog::new().pick_folder()
+    {
+        match folder
+            .to_str()
+            .ok_or_else(|| "The folder cannot be represented in settings".to_owned())
+            .and_then(|folder| {
+                crate::hostenv::validate_executable_dir(folder).map(|_| folder.to_owned())
+            }) {
+            Ok(folder) => {
+                if !state.draft.extra_executable_dirs.contains(&folder) {
+                    state.draft.extra_executable_dirs.push(folder);
+                    changed = true;
+                }
+                state.executable_dir_error = None;
+            }
+            Err(error) => state.executable_dir_error = Some(error),
+        }
+    }
+    if changed {
+        engine.send(EngineCommand::SaveSettings {
+            settings: Box::new(state.draft.clone()),
+        });
+    }
+    if let Some(error) = &state.executable_dir_error {
+        ui.label(RichText::new(error).color(theme::err()));
+    }
+    ui.label("Effective PATH for this process");
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = path.to_string_lossy();
+    ui.add(
+        egui::TextEdit::multiline(&mut path.as_ref())
+            .font(egui::TextStyle::Monospace)
+            .desired_width(f32::INFINITY),
+    );
+    let gh = crate::hostenv::find_on_path("gh")
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "Not found — add its containing folder above and restart".to_owned());
+    ui.label(format!("gh: {gh}"));
+    ui.separator();
+}
+
+/// Review and install an update without leaving the current workspace.
+pub fn update_dialog(
+    ctx: &egui::Context,
+    open: &mut bool,
+    available: Option<&(String, String)>,
+    update: &crate::app::update_controller::UpdateController,
+) -> Option<crate::app::update_controller::UpdateCommand> {
+    if !*open {
+        return None;
+    }
+    const DIALOG_WIDTH: f32 = 380.0;
+    const SCREEN_MARGIN: f32 = 32.0;
+    const CONTENT_HEIGHT_FRACTION: f32 = 0.7;
+    const SECTION_SPACING: f32 = 12.0;
+    let response = egui::Modal::new(egui::Id::new("update_dialog"))
+        .frame(theme::card_frame())
+        .show(ctx, |ui| {
+            ui.set_width(DIALOG_WIDTH.min((ctx.screen_rect().width() - SCREEN_MARGIN).max(0.0)));
+            ui.label(theme::title("Update INXM", theme::FONT_HEADING));
+            ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
+            if let Some((version, url)) = available {
+                ui.label(format!("Available version: {version}"));
+                ui.hyperlink_to("Release notes", url);
+            }
+            ui.add_space(SECTION_SPACING);
+            let command = egui::ScrollArea::vertical()
+                .max_height(ctx.screen_rect().height() * CONTENT_HEIGHT_FRACTION)
+                .show(ui, |ui| update_controls(ui, update, available.is_some()))
+                .inner;
+            ui.add_space(SECTION_SPACING);
+            ui.label(
+                RichText::new("Closing this dialog does not cancel an update.")
+                    .size(theme::FONT_SMALL)
+                    .color(theme::text_muted()),
+            );
+            let close = widgets::ghost_button(ui, "Close").clicked();
+            (command, close)
+        });
+    if response.should_close() || response.inner.1 {
+        *open = false;
+    }
+    response.inner.0
+}
+
+fn update_controls(
+    ui: &mut Ui,
+    update: &crate::app::update_controller::UpdateController,
+    available: bool,
+) -> Option<crate::app::update_controller::UpdateCommand> {
+    use crate::app::{update_controller::UpdateCommand, updater::UpdateStatus};
+    let mut command = None;
+    match &update.status {
+        None if available => {
+            if widgets::primary_button(ui, "Download and install").clicked() {
+                command = Some(UpdateCommand::DownloadAndInstall);
+            }
+        }
+        Some(UpdateStatus::Downloading { bytes, total }) => {
+            ui.label(format!(
+                "Downloading {bytes} bytes{}",
+                total.map(|total| format!(" / {total}")).unwrap_or_default()
+            ));
+            if let Some(total) = total.filter(|total| *total > 0) {
+                ui.add(egui::ProgressBar::new(*bytes as f32 / total as f32));
+            }
+            if widgets::ghost_button(ui, "Cancel").clicked() {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Verifying) => {
+            ui.label("Verifying SHA-256…");
+            if widgets::ghost_button(ui, "Cancel").clicked() {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Ready { version }) => {
+            ui.label(format!("v{version} verified; preparing installation…"));
+        }
+        Some(UpdateStatus::Installing) => {
+            ui.label("Installing… New runs and compiler work are paused.");
+        }
+        Some(UpdateStatus::Installed { .. }) => {
+            ui.label(if update.installer_handoff {
+                "Installer is ready and will run after INXM exits, then reopen this launch mode. New work is paused."
+            } else {
+                "Update installed. New work stays paused until restart."
+            });
+            if widgets::primary_button(ui, "Restart now").clicked() {
+                command = Some(UpdateCommand::RestartNow);
+            }
+            if update.restart_later {
+                ui.label("Restart postponed. Fully quit when ready; new work remains paused.");
+            }
+            if !update.restart_later && widgets::ghost_button(ui, "Restart later").clicked() {
+                command = Some(UpdateCommand::RestartLater);
+            }
+        }
+        Some(UpdateStatus::Failed(error)) => {
+            widgets::wrapped_label(ui, RichText::new(error).color(theme::err()));
+            ui.hyperlink_to("Manual update", RELEASES_URL);
+            if widgets::ghost_button(ui, "Retry").clicked() {
+                command = Some(UpdateCommand::Retry);
+            }
+            if update.pending()
+                && widgets::ghost_button(ui, "Cancel update and resume work").clicked()
+            {
+                command = Some(UpdateCommand::Cancel);
+            }
+        }
+        Some(UpdateStatus::Cancelled) => {
+            ui.label("Update cancelled; installation unchanged.");
+            if widgets::ghost_button(ui, "Retry").clicked() {
+                command = Some(UpdateCommand::Retry);
+            }
+        }
+        _ => {}
+    }
+    command
 }

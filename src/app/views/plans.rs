@@ -43,10 +43,16 @@ pub struct ImportCollision {
 pub enum PlansAction {
     /// Navigate to the conversation owned by this plan.
     OpenPlan(String),
+    InspectJson(String),
     /// Navigate to the plan conversation and inspect this execution.
-    OpenRun { plan_id: String, run_id: String },
+    OpenRun {
+        plan_id: String,
+        run_id: String,
+    },
     /// Navigate to the plan conversation and start an execution there.
-    RunPlan { plan_id: String },
+    RunPlan {
+        plan_id: String,
+    },
     /// Open the Schedules view with this plan preselected.
     SchedulePlan(String),
     /// Open the cross-plan Runs view ("View all →" under Recent runs).
@@ -166,6 +172,9 @@ pub fn show(
                                     && widgets::ghost_button(ui, "Open in chat").clicked()
                                 {
                                     action = Some(PlansAction::OpenPlan(plan.id.clone()));
+                                }
+                                if widgets::ghost_button(ui, "JSON").clicked() {
+                                    action = Some(PlansAction::InspectJson(plan.id.clone()));
                                 }
                                 if widgets::ghost_button(ui, "⇩ Export").clicked()
                                     && let Some(dest_path) = rfd::FileDialog::new()

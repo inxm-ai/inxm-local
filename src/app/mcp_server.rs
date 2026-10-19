@@ -596,6 +596,13 @@ async fn call_tool(state: &McpState, params: ToolCallParams) -> Result<Value, Js
     let request_id = uuid::Uuid::new_v4().to_string();
     let started = std::time::Instant::now();
     let result: anyhow::Result<Value> = async {
+        let readonly = tool_kind.starts_with("list_")
+            || matches!(tool_kind, "show_plan" | "inspect_run" | "export_plan");
+        let _work = if readonly {
+            None
+        } else {
+            Some(super::update_gate::admit(&state.paths.data_dir).map_err(anyhow::Error::msg)?)
+        };
         Ok(match params.name.as_str() {
             "compile_plan" => compile_plan(state, args(params.arguments)?).await?,
             "list_plans" => list_plans(state)?,
@@ -765,7 +772,10 @@ fn catalog(state: &McpState) -> anyhow::Result<ToolCatalog> {
 async fn compile_plan(state: &McpState, args: CompileArgs) -> anyhow::Result<Value> {
     let key = format!("{COMPILE_PLAN_DEDUP_PREFIX}{}", args.intent.trim());
     let task_state = state.clone();
+    let work_guard =
+        super::update_gate::admit(&state.paths.data_dir).map_err(anyhow::Error::msg)?;
     await_detached(&state.compiles, "compile_plan", key, async move {
+        let _work_guard = work_guard;
         compile_plan_detached(&task_state, args).await
     })
     .await
@@ -1139,7 +1149,10 @@ async fn edit_plan(state: &McpState, args: EditArgs) -> anyhow::Result<Value> {
         args.instruction.trim()
     );
     let task_state = state.clone();
+    let work_guard =
+        super::update_gate::admit(&state.paths.data_dir).map_err(anyhow::Error::msg)?;
     await_detached(&state.compiles, "edit_plan", key, async move {
+        let _work_guard = work_guard;
         edit_plan_detached(&task_state, args).await
     })
     .await
@@ -1423,7 +1436,10 @@ fn inspect_run(state: &McpState, args: RunRefArgs) -> anyhow::Result<Value> {
 async fn repair_run(state: &McpState, args: RunRefArgs) -> anyhow::Result<Value> {
     let key = format!("repair_run{DEDUP_FIELD_SEPARATOR}{}", args.run_id.trim());
     let task_state = state.clone();
+    let work_guard =
+        super::update_gate::admit(&state.paths.data_dir).map_err(anyhow::Error::msg)?;
     await_detached(&state.compiles, "repair_run", key, async move {
+        let _work_guard = work_guard;
         repair_run_detached(&task_state, args).await
     })
     .await

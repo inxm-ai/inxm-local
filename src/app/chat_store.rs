@@ -112,6 +112,8 @@ struct StoredSession {
     created_at: chrono::DateTime<chrono::Utc>,
     updated_at: chrono::DateTime<chrono::Utc>,
     messages: Vec<StoredMessage>,
+    #[serde(default)]
+    input: String,
     /// In-progress guided create-a-plan flow, so reopening the app resumes
     /// the refine/design conversation instead of stranding the user.
     /// Transient in-flight flags inside are `#[serde(skip)]` and reset on load.
@@ -390,7 +392,7 @@ pub fn save(
     chat: &ChatState,
 ) -> std::io::Result<()> {
     let messages: Vec<StoredMessage> = chat.messages.iter().filter_map(to_stored).collect();
-    if messages.is_empty() && chat.plan.is_none() {
+    if messages.is_empty() && chat.plan.is_none() && chat.flow.is_none() && chat.input.is_empty() {
         return Ok(());
     }
     if let Some(plan_id) = chat.plan_id()
@@ -409,6 +411,7 @@ pub fn save(
         created_at,
         updated_at: chrono::Utc::now(),
         messages,
+        input: chat.input.clone(),
         flow: chat.flow.clone(),
     };
     std::fs::create_dir_all(chats_dir(data_dir))?;
@@ -467,6 +470,7 @@ pub fn load(
             chat
         });
     chat.flow = session.flow;
+    chat.input = session.input;
     Ok((chat, session.created_at, session.plan_id))
 }
 
@@ -518,6 +522,7 @@ pub fn fingerprint(chat: &ChatState) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::hash::DefaultHasher::new();
+    chat.input.hash(&mut hasher);
     for stored in chat.messages.iter().filter_map(to_stored) {
         // The serialized form is what ends up on disk; a serialization
         // failure hashes as empty and the save path reports it instead.
@@ -934,5 +939,21 @@ mod tests {
             lines[1].stream,
             super::super::views::chat::AgentTranscriptLineStream::Error
         );
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+    #[test]
+    fn unsent_multiline_draft_is_saved_and_changes_fingerprint() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut chat = ChatState::default();
+        let original = fingerprint(&chat);
+        chat.input = "unsent\nsecond line".to_owned();
+        assert_ne!(original, fingerprint(&chat));
+        save(directory.path(), "draft-test", chrono::Utc::now(), &chat).unwrap();
+        let (loaded, _, _) = load(directory.path(), "draft-test").unwrap();
+        assert_eq!(loaded.input, chat.input);
     }
 }

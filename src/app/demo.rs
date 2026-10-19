@@ -31,6 +31,7 @@ pub fn initial_view_override() -> Option<View> {
         "schedules" => Some(View::Schedules),
         "mcp" => Some(View::Mcp),
         "settings" => Some(View::Settings),
+        "documentation" | "docs" => Some(View::Documentation),
         _ => None,
     }
 }

@@ -378,6 +378,9 @@ pub struct AppSettings {
     pub api_base: String,
     #[serde(default)]
     pub executable: String,
+    /// Ordered executable folders prepended to PATH on the next full launch.
+    #[serde(default)]
+    pub extra_executable_dirs: Vec<String>,
     /// Full command line for [`BackendChoice::CustomCli`], e.g.
     /// `opencode run --print "{{PROMPT}}"`. Empty pipes the prompt to stdin
     /// instead — see `crate::llm::CUSTOM_CLI_PROMPT_PLACEHOLDER`.
@@ -482,6 +485,7 @@ impl Default for AppSettings {
             api_key: String::new(),
             api_base: String::new(),
             executable: String::new(),
+            extra_executable_dirs: Vec::new(),
             command_template: String::new(),
             custom_cli_agentic: false,
             experimental_agent_calls: false,
@@ -1905,6 +1909,24 @@ pub(crate) fn create_configured_backend(
 // ─── Command handlers ─────────────────────────────────────────────────────────
 
 async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Result<()> {
+    let kind = EngineCommandTrace::from_command(&command).command_kind;
+    let readonly = kind.starts_with("list_")
+        || matches!(
+            kind,
+            "bootstrap"
+                | "check_for_updates"
+                | "abort_run"
+                | "inspect_run"
+                | "inspect_run_read_only"
+                | "show_plan"
+                | "export_plan"
+                | "save_settings"
+        );
+    let _work = if readonly {
+        None
+    } else {
+        Some(super::update_gate::admit(&env.paths.data_dir).map_err(anyhow::Error::msg)?)
+    };
     match command {
         EngineCommand::Bootstrap => bootstrap(env),
         EngineCommand::Compile { intent } => compile(env, intent).await,
@@ -2694,6 +2716,10 @@ async fn scheduler_loop(env: EngineEnv) {
         tokio::time::sleep(SCHEDULER_TICK).await;
         let now = chrono::Local::now();
 
+        let Ok(work_guard) = super::update_gate::admit(&env.paths.data_dir) else {
+            continue;
+        };
+        let work_guard = Arc::new(work_guard);
         let schedules_paused = AppSettings::load(&env.paths.settings_path).schedules_paused;
         let active_ids = match active.lock() {
             Ok(guard) => guard.clone(),
@@ -2801,7 +2827,9 @@ async fn scheduler_loop(env: EngineEnv) {
                 "scheduled occurrence dispatched"
             );
             let active = active.clone();
+            let work_guard = work_guard.clone();
             tokio::spawn(async move {
+                let _work_guard = work_guard;
                 let started = std::time::Instant::now();
                 let result = run_plan_with_timeout(
                     &scheduled_env,
@@ -5181,6 +5209,11 @@ async fn check_for_updates(env: &EngineEnv, manual: bool) {
             .await?
             .error_for_status()?;
         let body: serde_json::Value = response.json().await?;
+        if body.get("draft").and_then(|v| v.as_bool()) == Some(true)
+            || body.get("prerelease").and_then(|v| v.as_bool()) == Some(true)
+        {
+            anyhow::bail!("Only stable published releases may be installed");
+        }
         let tag = body
             .get("tag_name")
             .and_then(|v| v.as_str())
@@ -5259,7 +5292,6 @@ fn valid_semver_identifiers(value: &str, reject_numeric_leading_zero: bool) -> b
 /// Whether `latest` (e.g. `"v0.2.0"`) is a newer semver than `current` (e.g.
 /// `"0.1.0"`). Unparsable input on either side is treated as "not newer" so a
 /// malformed tag can never falsely trigger the update badge.
-#[cfg(test)]
 pub(crate) fn is_newer_version(latest: &str, current: &str) -> bool {
     match (parse_semver(latest), parse_semver(current)) {
         (Some(latest), Some(current)) => latest > current,
@@ -7450,5 +7482,22 @@ tools:
         );
         assert_eq!(slugify_tool_name("!!! ??? "), "new-tool");
         assert_eq!(slugify_tool_name(""), "new-tool");
+    }
+}
+
+#[cfg(test)]
+mod executable_settings_tests {
+    use super::*;
+    #[test]
+    fn legacy_settings_default_folders_and_roundtrip_preserves_order() {
+        let settings: AppSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.extra_executable_dirs.is_empty());
+        let settings = AppSettings {
+            extra_executable_dirs: vec!["/one with spaces".to_owned(), "/two".to_owned()],
+            ..settings
+        };
+        let encoded = serde_json::to_string(&settings).unwrap();
+        let loaded: AppSettings = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(loaded.extra_executable_dirs, settings.extra_executable_dirs);
     }
 }
