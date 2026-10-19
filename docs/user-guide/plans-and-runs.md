@@ -16,6 +16,13 @@ A plan is the versioned, executable definition of a workflow. It contains:
 
 Dependencies form a graph rather than a fixed list of commands. The executor runs a step only after its dependencies are complete, so later steps can consume validated inputs and earlier step outputs. A plan can be edited or repaired into a new version while keeping the plan identity and its history.
 
+## Sharing plans
+
+If you want to share a plan with someone, open **Plans**, choose **Export** on that plan, and send them the JSON file. They can import it by choosing **Import plan** on their **Plans** page and selecting the file. If they already have a plan with the same name, INXM asks whether to import it as a new version, save it as a separate copy, or cancel.
+
+!!! warning "The exported file does not include the tools"
+    The JSON file contains the plan, but **not its tools' local setup or credentials**. If a required tool is missing or disabled on the recipient's computer, import will fail and the **Plans** page will list its name. They must add and enable it in **MCP Tools**, then try importing again. 
+
 ## Runs
 
 A run is one execution of one plan version. Before execution, the invocation is checked against the plan's input contract: missing required values, unknown values, and incorrect types are rejected before work begins.
