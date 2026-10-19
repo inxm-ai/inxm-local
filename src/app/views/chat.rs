@@ -389,6 +389,15 @@ impl ChatState {
         self.plan.as_ref().map(|plan| plan.metadata.id.as_str())
     }
 
+    pub(crate) fn reconcile_runs(&mut self, runs: &[RunListItem]) {
+        if self.workspace_run.as_ref().is_some_and(|binding| {
+            !binding.is_active() && !runs.iter().any(|run| run.id == binding.run_id)
+        }) {
+            self.workspace_run = None;
+            self.reveal_run_details = false;
+        }
+    }
+
     /// Resolve the failed run that `/repair` should target when no explicit
     /// run id was supplied. An inspected failed run is the strongest context;
     /// otherwise the latest failure recorded in this conversation wins.
@@ -396,6 +405,10 @@ impl ChatState {
         self.workspace_run
             .as_ref()
             .filter(|run| run.finished.as_ref().is_some_and(RunStatus::is_failed))
+            .filter(|binding| {
+                runs.iter()
+                    .any(|run| run.id == binding.run_id && run.status.is_failed())
+            })
             .map(|run| run.run_id.clone())
             .or_else(|| {
                 self.plan_id().and_then(|plan_id| {
@@ -410,7 +423,13 @@ impl ChatState {
                     .iter()
                     .rev()
                     .find_map(|message| match &message.body {
-                        MessageBody::RunFailed { run_id, .. } => Some(run_id.clone()),
+                        MessageBody::RunFailed { run_id, .. }
+                            if runs
+                                .iter()
+                                .any(|run| run.id == *run_id && run.status.is_failed()) =>
+                        {
+                            Some(run_id.clone())
+                        }
                         _ => None,
                     })
             })
@@ -422,6 +441,10 @@ impl ChatState {
     fn contextual_run_id(&self, runs: &[RunListItem]) -> Option<String> {
         self.workspace_run
             .as_ref()
+            // A concurrent list snapshot can predate a newly started live run.
+            .filter(|binding| {
+                binding.is_active() || runs.iter().any(|run| run.id == binding.run_id)
+            })
             .map(|run| run.run_id.clone())
             .or_else(|| {
                 self.plan_id().and_then(|plan_id| {
@@ -438,7 +461,11 @@ impl ChatState {
                     .find_map(|message| match &message.body {
                         MessageBody::RunStarted { run_id, .. }
                         | MessageBody::RunFailed { run_id, .. }
-                        | MessageBody::RunCompleted { run_id, .. } => Some(run_id.clone()),
+                        | MessageBody::RunCompleted { run_id, .. }
+                            if runs.iter().any(|run| run.id == *run_id) =>
+                        {
+                            Some(run_id.clone())
+                        }
                         _ => None,
                     })
             })
@@ -3487,6 +3514,18 @@ mod tests {
         }
     }
 
+    fn listed_run(id: &str, status: RunStatus) -> RunListItem {
+        RunListItem {
+            id: id.to_owned(),
+            plan_id: "plan-1".to_owned(),
+            plan_name: "demo".to_owned(),
+            status,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            source: None,
+        }
+    }
+
     #[test]
     fn agent_transcript_lines_append_in_order_and_keep_stream_identity() {
         let mut chat = ChatState::default();
@@ -3732,6 +3771,15 @@ mod tests {
 
     #[test]
     fn repair_context_prefers_an_inspected_failure_then_the_latest_chat_failure() {
+        let failed = RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "boom".to_owned(),
+        };
+        let runs = [
+            listed_run("older-failure", failed.clone()),
+            listed_run("newer-failure", failed.clone()),
+            listed_run("inspected-failure", failed.clone()),
+        ];
         let mut chat = ChatState::default();
         chat.push(
             Role::Assistant,
@@ -3751,27 +3799,28 @@ mod tests {
         );
 
         assert_eq!(
-            chat.contextual_failed_run_id(&[]).as_deref(),
+            chat.contextual_failed_run_id(&runs).as_deref(),
             Some("newer-failure")
         );
 
         chat.workspace_run = Some(RunBinding {
             run_id: "inspected-failure".to_owned(),
-            finished: Some(RunStatus::Failed {
-                failed_step_id: "step".to_owned(),
-                message: "boom".to_owned(),
-            }),
+            finished: Some(failed),
             ..Default::default()
         });
 
         assert_eq!(
-            chat.contextual_failed_run_id(&[]).as_deref(),
+            chat.contextual_failed_run_id(&runs).as_deref(),
             Some("inspected-failure")
         );
     }
 
     #[test]
     fn inspect_context_uses_the_current_workspace_or_latest_chat_run() {
+        let runs = [
+            listed_run("latest-run", RunStatus::Succeeded),
+            listed_run("workspace-run", RunStatus::Succeeded),
+        ];
         let mut chat = ChatState::default();
         chat.push(
             Role::Assistant,
@@ -3781,7 +3830,7 @@ mod tests {
             },
         );
 
-        assert_eq!(chat.contextual_run_id(&[]).as_deref(), Some("latest-run"));
+        assert_eq!(chat.contextual_run_id(&runs).as_deref(), Some("latest-run"));
 
         chat.workspace_run = Some(RunBinding {
             run_id: "workspace-run".to_owned(),
@@ -3789,8 +3838,173 @@ mod tests {
         });
 
         assert_eq!(
-            chat.contextual_run_id(&[]).as_deref(),
+            chat.contextual_run_id(&runs).as_deref(),
             Some("workspace-run")
+        );
+    }
+
+    #[test]
+    fn refreshed_runs_clear_only_deleted_workspace_selections_and_keep_history() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "selected".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            reveal_run_details: true,
+            ..Default::default()
+        };
+        chat.push(
+            Role::Assistant,
+            MessageBody::RunCompleted {
+                run_id: "selected".to_owned(),
+                text: "Historical result".to_owned(),
+            },
+        );
+
+        chat.reconcile_runs(&[listed_run("selected", RunStatus::Succeeded)]);
+
+        assert_eq!(chat.workspace_run.as_ref().unwrap().run_id, "selected");
+        assert!(chat.reveal_run_details);
+
+        chat.reconcile_runs(&[listed_run("other", RunStatus::Succeeded)]);
+
+        assert!(chat.workspace_run.is_none());
+        assert!(!chat.reveal_run_details);
+        assert!(matches!(
+            &chat.messages[0].body,
+            MessageBody::RunCompleted { run_id, text }
+                if run_id == "selected" && text == "Historical result"
+        ));
+        assert_eq!(chat.contextual_run_id(&[]), None);
+    }
+
+    #[test]
+    fn a_snapshot_taken_before_run_start_keeps_the_live_workspace_and_context() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "live-run".to_owned(),
+                ..Default::default()
+            }),
+            reveal_run_details: true,
+            ..Default::default()
+        };
+
+        chat.reconcile_runs(&[]);
+
+        assert_eq!(chat.workspace_run.as_ref().unwrap().run_id, "live-run");
+        assert!(chat.reveal_run_details);
+        assert_eq!(chat.contextual_run_id(&[]).as_deref(), Some("live-run"));
+    }
+
+    #[test]
+    fn inspect_context_skips_deleted_workspace_and_every_historical_run_kind() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for body in [
+            MessageBody::RunCompleted {
+                run_id: "existing".to_owned(),
+                text: "done".to_owned(),
+            },
+            MessageBody::RunStarted {
+                run_id: "deleted".to_owned(),
+                text: "started".to_owned(),
+                active: false,
+            },
+            MessageBody::RunFailed {
+                run_id: "deleted".to_owned(),
+                text: "failed".to_owned(),
+                repair_requested: false,
+            },
+            MessageBody::RunCompleted {
+                run_id: "deleted".to_owned(),
+                text: "done".to_owned(),
+            },
+        ] {
+            chat.push(Role::Assistant, body);
+        }
+
+        assert_eq!(
+            chat.contextual_run_id(&[listed_run("existing", RunStatus::Succeeded)])
+                .as_deref(),
+            Some("existing")
+        );
+        assert_eq!(chat.contextual_run_id(&[]), None);
+        assert_eq!(chat.messages.len(), 4);
+    }
+
+    #[test]
+    fn repair_context_skips_deleted_or_no_longer_failed_runs() {
+        let failed = RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "boom".to_owned(),
+        };
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(failed.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for run_id in ["existing", "no-longer-failed", "deleted"] {
+            chat.push(
+                Role::Assistant,
+                MessageBody::RunFailed {
+                    run_id: run_id.to_owned(),
+                    text: "failed".to_owned(),
+                    repair_requested: false,
+                },
+            );
+        }
+        let runs = [
+            listed_run("existing", failed),
+            listed_run("no-longer-failed", RunStatus::Succeeded),
+        ];
+
+        assert_eq!(
+            chat.contextual_failed_run_id(&runs).as_deref(),
+            Some("existing")
+        );
+        assert_eq!(chat.contextual_failed_run_id(&[]), None);
+        assert_eq!(chat.messages.len(), 3);
+    }
+
+    #[test]
+    fn command_context_falls_back_to_existing_runs_for_the_owned_plan() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        chat.attach_plan(Box::new(demo_plan(1)));
+        let mut older = listed_run(
+            "older-failure",
+            RunStatus::Failed {
+                failed_step_id: "step".to_owned(),
+                message: "boom".to_owned(),
+            },
+        );
+        older.started_at -= chrono::Duration::seconds(1);
+        let newer = listed_run("newer-success", RunStatus::Succeeded);
+        let runs = [newer, older];
+
+        assert_eq!(
+            chat.contextual_run_id(&runs).as_deref(),
+            Some("newer-success")
+        );
+        assert_eq!(
+            chat.contextual_failed_run_id(&runs).as_deref(),
+            Some("older-failure")
         );
     }
 
