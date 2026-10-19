@@ -444,6 +444,7 @@ fn install_fonts(ctx: &egui::Context) {
     const GEIST_MEDIUM: &[u8] = include_bytes!("../../assets/fonts/Geist-SemiBold.ttf");
     const GEIST_MONO: &[u8] = include_bytes!("../../assets/fonts/GeistMono-Regular.ttf");
     const DEJAVU_SANS: &[u8] = include_bytes!("../../assets/fonts/DejaVuSans.ttf");
+    const NOTO_EMOJI: &[u8] = include_bytes!("../../assets/fonts/NotoEmoji-Subset.ttf");
 
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
@@ -462,12 +463,20 @@ fn install_fonts(ctx: &egui::Context) {
         "dejavu".into(),
         std::sync::Arc::new(egui::FontData::from_static(DEJAVU_SANS)),
     );
+    // egui's built-in emoji font predates newer emoji (e.g. the Windows
+    // window), which rendered as empty boxes; this one takes priority over it.
+    fonts.font_data.insert(
+        "noto-emoji".into(),
+        std::sync::Arc::new(egui::FontData::from_static(NOTO_EMOJI)),
+    );
 
     let proportional = fonts.families.entry(FontFamily::Proportional).or_default();
+    proportional.insert(0, "noto-emoji".into());
     proportional.insert(0, "dejavu".into());
     proportional.insert(0, "geist".into());
 
     let monospace = fonts.families.entry(FontFamily::Monospace).or_default();
+    monospace.insert(0, "noto-emoji".into());
     monospace.insert(0, "dejavu".into());
     monospace.insert(0, "geist-mono".into());
 
@@ -476,6 +485,7 @@ fn install_fonts(ctx: &egui::Context) {
         vec![
             "geist-medium".into(),
             "dejavu".into(),
+            "noto-emoji".into(),
             "NotoEmoji-Regular".into(),
             "emoji-icon-font".into(),
         ],
