@@ -8,9 +8,9 @@
 //! would be meaningless (or unsafe) to copy to another machine.
 //!
 //! On import, a tool whose name already exists in the local catalog is left
-//! untouched (the local, presumably correctly-configured, entry wins). A
-//! tool that doesn't exist locally is synthesized fresh from its reference —
-//! see `Backend::synthesize_tool` in the compiler module.
+//! untouched. Every referenced tool must already exist locally and be
+//! allowlisted; missing or disabled tools cause import to fail without
+//! generating tools or changing the local catalog.
 
 use indexmap::IndexSet;
 use serde::{Deserialize, Serialize};
@@ -43,8 +43,8 @@ pub struct ToolReference {
     pub input_schema: serde_json::Value,
     #[serde(default = "empty_schema")]
     pub output_schema: serde_json::Value,
-    /// Best-effort hint for which `ToolConfig` shape to synthesize on
-    /// import. Never influences validation — purely a prompt nudge.
+    /// Best-effort description of the tool's kind. Import still requires a
+    /// configured, allowlisted local entry and never generates one.
     #[serde(default)]
     pub kind_hint: Option<ToolKind>,
 }
@@ -66,7 +66,7 @@ impl PlanBundle {
     /// Returns the bundle plus the names of any tools the plan calls that
     /// are missing from `catalog` — those are still included in the bundle
     /// as bare name-only references, but the caller should warn the user
-    /// since there is no description to synthesize a good tool from later.
+    /// since the recipient must identify and configure those tools locally.
     pub fn from_plan(plan: &Plan, catalog: &ToolCatalog) -> (Self, Vec<String>) {
         let mut missing = Vec::new();
         let mut seen = IndexSet::new();

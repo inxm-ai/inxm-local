@@ -4965,7 +4965,7 @@ fn export_plan(env: &EngineEnv, plan_ref: &str, dest_path: &Path) -> anyhow::Res
         message.push_str(&format!(
             "\n\nNote: {} tool(s) this plan calls aren't in your local catalog either, so \
              they were exported as bare name-only references and may be harder to \
-             reconstruct on import: {}",
+             identify and configure locally before import: {}",
             missing.len(),
             missing.join(", ")
         ));
@@ -4986,71 +4986,7 @@ async fn import_plan(
     ensure_agent_call_allowed(&bundle.plan, &settings)?;
 
     let catalog = env.catalog()?;
-    let missing: Vec<&ToolReference> = bundle
-        .tools
-        .iter()
-        .filter(|t| !catalog.contains(&t.name))
-        .collect();
-
-    let mut synthesized: Vec<ToolEntry> = Vec::new();
-    if !missing.is_empty() {
-        let backend = create_configured_backend(&settings).map_err(|_| {
-            anyhow::anyhow!(
-                "this plan references {} tool(s) not in your local catalog ({}), and no \
-                 compiler is configured to generate them \u{2014} pick one under Settings, or add \
-                 them manually in MCP Tools first",
-                missing.len(),
-                missing
-                    .iter()
-                    .map(|t| t.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-
-        let claude_usage = LedgerRecorder::support(
-            env.storage().ok(),
-            crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
-            crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
-            SupportKind::ToolSynthesis,
-            Some(bundle.plan.metadata.id.as_str()),
-        );
-        for reference in &missing {
-            let request = ToolSynthesisRequest {
-                name: reference.name.clone(),
-                description: reference.description.clone(),
-                input_schema: reference.input_schema.clone(),
-                output_schema: reference.output_schema.clone(),
-                kind_hint: reference.kind_hint.clone(),
-                extra_context: Some(EnvProbe::detect().compiler_context()),
-            };
-            let entry = super::usage::scoped(&claude_usage, backend.synthesize_tool(request))
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!("could not generate tool '{}': {e}", reference.name)
-                })?;
-            synthesized.push(entry);
-        }
-    }
-
-    let updated_catalog = if synthesized.is_empty() {
-        catalog
-    } else {
-        env.paths
-            .mutations
-            .run_named("catalog.import_merge", env.triggered_by(), || {
-                let mut snapshot = env.catalog_snapshot()?;
-                for entry in &synthesized {
-                    if !snapshot.catalog.contains(&entry.name) {
-                        snapshot.upsert(entry.clone())?;
-                    }
-                }
-                snapshot.save_to_file(&env.paths.catalog_path)?;
-                Ok(snapshot.catalog)
-            })?
-    };
-
-    let unavailable_tools = unavailable_plan_tools(&bundle.tools, &updated_catalog);
+    let unavailable_tools = unavailable_plan_tools(&bundle.tools, &catalog);
     if !unavailable_tools.is_empty() {
         anyhow::bail!(
             "The plan uses tools that are missing or disabled in your local MCP Tools catalog: {}. \
@@ -5061,7 +4997,7 @@ async fn import_plan(
 
     let plan = bundle.plan;
 
-    let errors = validator::validate(&plan, &updated_catalog);
+    let errors = validator::validate(&plan, &catalog);
     if !errors.is_empty() {
         let bullet_list: String = errors
             .iter()
@@ -5088,7 +5024,7 @@ async fn import_plan(
     }
     let plan = resolution.plan;
 
-    let mut message = match resolution.outcome {
+    let message = match resolution.outcome {
         ImportOutcome::Imported => format!("Imported \u{201c}{}\u{201d}.", plan.name),
         ImportOutcome::NewVersion => {
             format!("Imported \u{201c}{}\u{201d} as a new version.", plan.name)
@@ -5096,18 +5032,6 @@ async fn import_plan(
         ImportOutcome::Duplicate => format!("Imported \u{201c}{}\u{201d} as a copy.", plan.name),
         ImportOutcome::Rejected => unreachable!("handled above"),
     };
-    if !synthesized.is_empty() {
-        message.push_str(&format!(
-            "\n\n{} new tool(s) were generated and saved as disabled \u{2014} review and \
-             allowlist them under MCP Tools before running this plan: {}",
-            synthesized.len(),
-            synthesized
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
     env.emit(EngineEvent::Assistant(message));
     env.emit(EngineEvent::PlanLoaded {
         plan: Box::new(plan),
@@ -7432,6 +7356,84 @@ tools:
             unavailable_plan_tools(&tools, &catalog),
             vec!["missing".to_owned(), "disabled".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn plan_import_requires_enabled_local_tools_without_changing_catalog() {
+        for allowlisted in [None, Some(false), Some(true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = DataPaths::at(tmp.path().to_owned());
+            AppSettings {
+                backend: BackendChoice::OpenAiCompatible,
+                api_base: "http://127.0.0.1:9/v1".to_owned(),
+                ..AppSettings::default()
+            }
+            .save(&paths.settings_path)
+            .unwrap();
+            let tool = named_http_tool("required-tool");
+            let exporting_catalog = ToolCatalog::new(vec![tool.clone()]);
+            let local_tools = allowlisted
+                .map(|enabled| ToolEntry {
+                    allowlisted: enabled,
+                    ..tool.clone()
+                })
+                .into_iter()
+                .collect();
+            ToolCatalog::new(local_tools)
+                .save_to_file(&paths.catalog_path)
+                .unwrap();
+            let original_catalog = std::fs::read(&paths.catalog_path).unwrap();
+            let mut plan = empty_plan_v1();
+            plan.steps.push(crate::plan::types::PlanStep {
+                id: "fetch".to_owned(),
+                name: "Fetch".to_owned(),
+                description: None,
+                config: crate::plan::types::StepConfig::ToolCall(
+                    crate::plan::types::ToolCallConfig {
+                        tool: tool.name.clone(),
+                        arguments: indexmap::IndexMap::from([(
+                            "url".to_owned(),
+                            serde_json::json!("https://example.com"),
+                        )]),
+                    },
+                ),
+                depends_on: vec![],
+                outputs: vec![],
+                timeout_secs: None,
+                retry: None,
+            });
+            let (bundle, missing) = PlanBundle::from_plan(&plan, &exporting_catalog);
+            assert!(missing.is_empty());
+            let bundle_path = tmp.path().join("import.json");
+            bundle.save_to_file(&bundle_path).unwrap();
+            let (evt_tx, events) = std::sync::mpsc::channel();
+            let mut env = test_env(paths.clone());
+            env.evt_tx = evt_tx;
+
+            let result = import_plan(&env, &bundle_path, ImportConflictPolicy::Reject).await;
+
+            assert_eq!(
+                std::fs::read(&paths.catalog_path).unwrap(),
+                original_catalog
+            );
+            let storage = env.storage().unwrap();
+            if allowlisted == Some(true) {
+                result.unwrap();
+                assert_eq!(storage.plans().list().unwrap().len(), 1);
+                assert!(
+                    events
+                        .try_iter()
+                        .any(|event| matches!(event.event, EngineEvent::PlanLoaded { .. }))
+                );
+            } else {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("required-tool"), "{message}");
+                assert!(message.contains("missing or disabled"), "{message}");
+                assert!(message.contains("retry the import"), "{message}");
+                assert!(storage.plans().list().unwrap().is_empty());
+                assert!(events.try_iter().next().is_none());
+            }
+        }
     }
 
     #[test]
