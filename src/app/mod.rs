@@ -2110,17 +2110,18 @@ impl InxmApp {
                 // connection status below from the update action above.
                 ui.add_space(theme::GAP);
                 ui.separator();
-                ui.add_space(theme::GAP);
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    if update_available_chip(ui, version) {
-                        self.update_dialog_open = true;
-                    }
-                });
+                ui.add_space(theme::GAP + UPDATE_CHIP_LIFT);
+                if update_available_chip(ui, version) {
+                    self.update_dialog_open = true;
+                }
             }
         });
     }
 }
+
+/// Extra clearance between the chip and the divider below it; the divider's
+/// own spacing otherwise leaves the chip nearly touching it.
+const UPDATE_CHIP_LIFT: f32 = 7.0;
 
 /// Update entry point above the sidebar connection indicators.
 fn update_available_chip(ui: &mut Ui, version: &str) -> bool {
@@ -2135,13 +2136,20 @@ fn update_available_chip(ui: &mut Ui, version: &str) -> bool {
         color,
     );
     let size = galley.size() + CHIP_PADDING * 2.0 + vec2(CHIP_ICON_SIZE + theme::GAP, 0.0);
-    let response = ui.add(
-        egui::Button::new("")
-            .min_size(size)
-            .fill(theme::surface())
-            .stroke(theme::readonly_control_stroke())
-            .corner_radius(CHIP_RADIUS),
-    );
+    let row_width = ui.available_width();
+    let response = ui
+        .horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.add_space(((row_width - size.x) / 2.0).max(0.0));
+            ui.add(
+                egui::Button::new("")
+                    .min_size(size)
+                    .fill(theme::surface())
+                    .stroke(theme::readonly_control_stroke())
+                    .corner_radius(CHIP_RADIUS),
+            )
+        })
+        .inner;
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), CHIP_LABEL)
     });

@@ -67,11 +67,17 @@ pub enum RunsAction {
         run_id: String,
     },
     /// Abort an in-progress run.
-    Abort { run_id: String },
+    Abort {
+        run_id: String,
+    },
     /// First click on ✕: ask the user to confirm.
-    AskDelete { run_id: String },
+    AskDelete {
+        run_id: String,
+    },
     /// Confirmed deletion of a finished run.
-    Delete { run_id: String },
+    Delete {
+        run_id: String,
+    },
 }
 
 fn next_delete_confirmation(
