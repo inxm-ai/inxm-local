@@ -21,7 +21,7 @@ Dependencies form a graph rather than a fixed list of commands. The executor run
 If you want to share a plan with someone, open **Plans**, choose **Export** on that plan, and send them the JSON file. They can import it by choosing **Import plan** on their **Plans** page and selecting the file. If they already have a plan with the same name, INXM asks whether to import it as a new version, save it as a separate copy, or cancel.
 
 !!! warning "The exported file does not include the tools"
-    The JSON file contains the plan, but **not its tools' local setup or credentials**. If a required tool is missing or disabled on the recipient's computer, import will fail and the **Plans** page will list its name. They must add and enable it in **MCP Tools**, then try importing again. 
+    The JSON file contains the plan, but **not its tools' local setup or credentials**. If a required tool is missing or disabled on the recipient's computer, import will fail and the **Plans** page will list its name. They must add and enable it in **MCP Tools**, then try importing again. Import does not generate tools, call a compiler, or modify the local tool catalog.
 
 ## Runs
 
