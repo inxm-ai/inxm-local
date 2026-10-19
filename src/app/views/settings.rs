@@ -1019,7 +1019,7 @@ pub fn update_dialog(
         .show(ctx, |ui| {
             ui.set_width(DIALOG_WIDTH.min((ctx.screen_rect().width() - SCREEN_MARGIN).max(0.0)));
             ui.label(theme::title("Update INXM", theme::FONT_HEADING));
-            ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
+            ui.label(format!("Installed version: {}", crate::version::DISPLAY));
             if let Some((version, url)) = available {
                 ui.label(format!("Available version: {version}"));
                 ui.hyperlink_to("Release notes", url);
@@ -1118,4 +1118,42 @@ fn update_controls(
         _ => {}
     }
     command
+}
+
+#[cfg(test)]
+mod update_dialog_tests {
+    use super::*;
+
+    #[test]
+    fn installed_version_label_uses_the_build_identity() {
+        fn contains_text(shape: &egui::Shape, expected: &str) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.job.text == expected,
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| contains_text(shape, expected))
+                }
+                _ => false,
+            }
+        }
+
+        let _guard = theme::test_mode_lock();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, true);
+        let mut open = true;
+        let update = crate::app::update_controller::UpdateController::default();
+        let expected = format!("Installed version: {}", crate::version::DISPLAY);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            update_dialog(ctx, &mut open, None, &update);
+        });
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            update_dialog(ctx, &mut open, None, &update);
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| contains_text(&shape.shape, &expected))
+        );
+    }
 }

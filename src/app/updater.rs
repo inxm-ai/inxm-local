@@ -207,7 +207,7 @@ fn download_https(
                 }
                 attempt.follow()
             }))
-            .user_agent(concat!("inxm-local/", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("inxm-local/{}", crate::version::DISPLAY))
             .build()
             .map_err(update_error)?;
         let mut response = tokio::select! {
