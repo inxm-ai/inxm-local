@@ -26,6 +26,7 @@ INXM Local records Claude API calls made to the Anthropic Messages API (`api.ant
 | Situation | What counts |
 | --- | --- |
 | Plan creation | Assessing your request, writing the design (including design corrections), and compiling (including retries after invalid JSON or failed validation), from chat or MCP |
+| Plan edits | Compiling an edit proposal from chat or MCP, including retries, whether or not you later apply the proposal |
 | Plan runs | Every `PROMPT_CALL` step, including each retry attempt and each `FAN_OUT` iteration, for new and resumed runs |
 | Plan support | Converting a schedule description to a cron expression, and generating tools from the MCP Tools page |
 
@@ -34,6 +35,7 @@ Not recorded:
 - Other providers (OpenAI, OpenAI-compatible, Vertex) and CLI backends (Codex CLI, Claude Code CLI, custom CLI)
 - Anthropic-compatible endpoints, meaning any base URL whose host is not `api.anthropic.com`
 - Answers to plain questions in chat (insight answers)
+- Repair proposals
 
 A call is recorded even when it fails, so retries and errors show up as their own entries:
 
@@ -82,7 +84,7 @@ Per call:
 
 Calls whose usage is `null` count as calls with unknown usage. They are never treated as zero tokens.
 
-- **Plan creation total:** find the link lines for the plan's `plan_id` to get its `creation_session_id` values, then add up every call with one of those session ids.
+- **Plan creation total:** add up `plan_creation` calls whose `context.plan_id` matches the plan (including edits), plus calls whose `creation_session_id` is tied to the plan by a link line. Count each call only once.
 - **Run total:** add up every call whose `context.run_id` matches the run.
 
 For example, to add up the total tokens of one run with `jq`:
