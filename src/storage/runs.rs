@@ -298,9 +298,17 @@ pub struct RunStore {
 }
 
 /// Exclusive ownership of a run's execution/deletion lifecycle.
-/// Closing the file releases the OS lock, including after a process exits.
+/// Explicitly unlock on drop so a duplicated/inherited handle cannot retain ownership.
 pub struct RunLifecycleGuard {
     _file: File,
+}
+
+impl Drop for RunLifecycleGuard {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(&self._file) {
+            tracing::warn!(%error, "could not release run lifecycle lock");
+        }
+    }
 }
 
 impl RunStore {
@@ -660,6 +668,25 @@ mod tests {
         drop(reacquired);
         drop(other);
         assert!(first.lock_lifecycle("same-run").is_ok());
+    }
+
+    #[test]
+    fn lifecycle_drop_releases_lock_even_while_a_duplicate_handle_remains_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let guard = store.lock_lifecycle("same-run").unwrap();
+        let duplicate = guard._file.try_clone().unwrap();
+        assert!(store.lock_lifecycle("same-run").is_err());
+
+        drop(guard);
+
+        let reacquired = store.lock_lifecycle("same-run").unwrap();
+        assert!(duplicate.metadata().is_ok());
+        assert!(store.lock_lifecycle("same-run").is_err());
+        drop(duplicate);
+        assert!(store.lock_lifecycle("same-run").is_err());
+        drop(reacquired);
+        assert!(store.lock_lifecycle("same-run").is_ok());
     }
 
     #[test]
