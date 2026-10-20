@@ -41,15 +41,19 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
     .to_owned();
     let workspace = validate_workspace(ctx, &working_dir)?;
 
-    let profile = ctx.llm_keys.profile.as_ref().ok_or_else(|| failure(
+    if let Some(error) = &ctx.llm_keys.profile_error {
+        return Err(failure(ctx, format!("invalid LLM settings: {error}")));
+    }
+    let source_profile = ctx.llm_keys.profile.as_ref().ok_or_else(|| failure(
         ctx,
         ctx.llm_keys.profile_error.as_deref().unwrap_or(
-            "AGENT_CALL requires an active Codex, Claude Code, or agent-shaped custom CLI connection",
+            "AGENT_CALL requires an active Claude/OpenAI API, Codex, Claude Code, or agent-shaped custom CLI connection",
         ),
     ))?;
+    let profile = agent_profile(source_profile).map_err(|message| failure(ctx, message))?;
     let objective = objective_with_workflow_context(&ctx.plan, &ctx.step.id, &objective);
     let (program, mut args, stdin, interactive) =
-        command(profile, &objective).map_err(|message| failure(ctx, message))?;
+        command(&profile, &objective).map_err(|message| failure(ctx, message))?;
     let timeout_secs = cfg
         .timeout_secs
         .or(ctx.global_timeout_secs)
@@ -188,6 +192,56 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
     })
 }
 
+fn agent_profile(source: &crate::llm::LlmProfile) -> Result<crate::llm::LlmProfile, String> {
+    source.validate().map_err(|error| error.to_string())?;
+    let mut profile = source.clone();
+    profile.protocol = match source.protocol {
+        LlmProtocol::AnthropicMessages => LlmProtocol::ClaudeCli,
+        LlmProtocol::OpenAiChat => LlmProtocol::CodexCli,
+        LlmProtocol::ClaudeCli | LlmProtocol::CodexCli | LlmProtocol::CustomCli => {
+            return Ok(profile);
+        }
+        _ => {
+            return Err(
+                "AGENT_CALL requires Claude, OpenAI, or an agent CLI connection".to_owned(),
+            );
+        }
+    };
+    profile.api_key = crate::llm::resolved_key(source)
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| {
+            "AGENT_CALL requires the selected API connection's key; configure it in Settings or its API-key environment variable"
+                .to_owned()
+        })?;
+    Ok(profile)
+}
+
+fn configure_api_auth(
+    command: &mut tokio::process::Command,
+    source: &crate::llm::LlmProfile,
+) -> Result<(), String> {
+    let profile = agent_profile(source)?;
+    match source.protocol {
+        LlmProtocol::AnthropicMessages => {
+            let base_url = source.base_url.trim_end_matches('/');
+            let base_url = base_url.strip_suffix("/v1").unwrap_or(base_url);
+            command
+                .env("ANTHROPIC_API_KEY", &profile.api_key)
+                .env("ANTHROPIC_BASE_URL", base_url)
+                .env_remove("ANTHROPIC_AUTH_TOKEN")
+                .env_remove("CLAUDE_CODE_OAUTH_TOKEN")
+                .env_remove("CLAUDE_CODE_USE_BEDROCK")
+                .env_remove("CLAUDE_CODE_USE_VERTEX")
+                .env_remove("CLAUDE_CODE_USE_FOUNDRY");
+        }
+        LlmProtocol::OpenAiChat => {
+            command.env("INXM_AGENT_API_KEY", &profile.api_key);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn validate_workspace(ctx: &StepContext, raw: &str) -> Result<PathBuf, ExecutorError> {
     if raw.trim().is_empty() {
         return Err(failure(
@@ -288,6 +342,21 @@ fn command(
             if !profile.model.trim().is_empty() {
                 args.extend(["--model".into(), profile.model.trim().into()]);
             }
+            if !profile.base_url.is_empty() {
+                for value in [
+                    "model_provider=\"inxm_api\"".to_owned(),
+                    "model_providers.inxm_api.name=\"INXM OpenAI API\"".to_owned(),
+                    format!(
+                        "model_providers.inxm_api.base_url={}",
+                        serde_json::to_string(&profile.base_url).expect("serialize base URL")
+                    ),
+                    "model_providers.inxm_api.env_key=\"INXM_AGENT_API_KEY\"".to_owned(),
+                    "model_providers.inxm_api.requires_openai_auth=false".to_owned(),
+                    "model_providers.inxm_api.wire_api=\"responses\"".to_owned(),
+                ] {
+                    args.extend(["-c".into(), value]);
+                }
+            }
             args.push("-".into());
             Ok((executable("codex"), args, objective.to_owned(), false))
         }
@@ -370,6 +439,9 @@ async fn run_process(
 ) -> Result<ProcessOutput, ExecutorError> {
     let resolved = crate::hostenv::resolve_program(spawn.program);
     let mut command = tokio::process::Command::new(&resolved);
+    if let Some(profile) = &ctx.llm_keys.profile {
+        configure_api_auth(&mut command, profile).map_err(|message| failure(ctx, message))?;
+    }
     command
         .args(spawn.args)
         .current_dir(workspace)
@@ -389,7 +461,7 @@ async fn run_process(
         failure(
             ctx,
             format!(
-                "failed to start agent CLI '{}': {error}",
+                "failed to start agent CLI '{}': {error}. Install the required CLI under Settings > Compiler > Experimental execution, or configure its executable path",
                 resolved.display()
             ),
         )
@@ -965,8 +1037,205 @@ mod tests {
     }
 
     #[test]
-    fn api_protocols_are_rejected() {
+    fn raw_api_profiles_must_be_adapted_before_building_cli_commands() {
         assert!(command(&profile(LlmProtocol::OpenAiChat), "fix it").is_err());
+    }
+
+    fn api_profile(protocol: LlmProtocol) -> LlmProfile {
+        let mut api = profile(protocol);
+        api.model = "test-model".to_owned();
+        api.api_key = "test-key-not-a-real-secret".to_owned();
+        api.auth = LlmAuth::Auto;
+        api.base_url = match protocol {
+            LlmProtocol::AnthropicMessages => "https://api.anthropic.com/v1/",
+            _ => "https://api.openai.com/v1",
+        }
+        .to_owned();
+        api
+    }
+
+    #[test]
+    fn api_connections_select_the_matching_agent_without_changing_prompt_profile() {
+        for (api_protocol, cli_protocol, executable) in [
+            (
+                LlmProtocol::AnthropicMessages,
+                LlmProtocol::ClaudeCli,
+                "claude",
+            ),
+            (LlmProtocol::OpenAiChat, LlmProtocol::CodexCli, "codex"),
+        ] {
+            let api = api_profile(api_protocol);
+            let agent = agent_profile(&api).unwrap();
+            assert_eq!(agent.protocol, cli_protocol);
+            assert_eq!(agent.model, api.model);
+            assert_eq!(api.protocol, api_protocol);
+            let (program, args, ..) = command(&agent, "fix it").unwrap();
+            assert_eq!(program, executable);
+            assert!(!args.iter().any(|arg| arg.contains(&api.api_key)));
+            let mut process = tokio::process::Command::new(&program);
+            configure_api_auth(&mut process, &api).unwrap();
+            let env = process
+                .as_std()
+                .get_envs()
+                .collect::<std::collections::BTreeMap<_, _>>();
+            let key_var = if api_protocol == LlmProtocol::AnthropicMessages {
+                "ANTHROPIC_API_KEY"
+            } else {
+                "INXM_AGENT_API_KEY"
+            };
+            assert_eq!(
+                env.get(std::ffi::OsStr::new(key_var)),
+                Some(&Some(std::ffi::OsStr::new(&api.api_key)))
+            );
+            if api_protocol == LlmProtocol::AnthropicMessages {
+                assert_eq!(
+                    env.get(std::ffi::OsStr::new("ANTHROPIC_BASE_URL")),
+                    Some(&Some(std::ffi::OsStr::new("https://api.anthropic.com")))
+                );
+                assert_eq!(
+                    env.get(std::ffi::OsStr::new("CLAUDE_CODE_OAUTH_TOKEN")),
+                    Some(&None)
+                );
+            } else {
+                assert!(args.iter().any(|arg| arg == "model_provider=\"inxm_api\""));
+                assert!(args.iter().any(|arg| arg == "model_providers.inxm_api.env_key=\"INXM_AGENT_API_KEY\""));
+                assert!(
+                    args.iter()
+                        .any(|arg| arg == "model_providers.inxm_api.wire_api=\"responses\"")
+                );
+                assert!(
+                    args.iter().any(|arg| arg
+                        == "model_providers.inxm_api.base_url=\"https://api.openai.com/v1\"")
+                );
+                assert!(
+                    args.iter()
+                        .any(|arg| arg == "model_providers.inxm_api.requires_openai_auth=false")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn account_cli_authentication_and_configuration_are_unchanged() {
+        for protocol in [LlmProtocol::ClaudeCli, LlmProtocol::CodexCli] {
+            let account = profile(protocol);
+            let agent = agent_profile(&account).unwrap();
+            assert_eq!(agent, account);
+            let (program, args, ..) = command(&agent, "fix it").unwrap();
+            assert!(!args.iter().any(|arg| arg.contains("inxm_api")));
+            let mut process = tokio::process::Command::new(program);
+            configure_api_auth(&mut process, &account).unwrap();
+            assert_eq!(process.as_std().get_envs().count(), 0);
+        }
+    }
+
+    #[test]
+    fn agent_routing_rejects_invalid_api_profiles_and_unsupported_protocols() {
+        let mut invalid = api_profile(LlmProtocol::AnthropicMessages);
+        invalid.base_url = "not a URL".to_owned();
+        assert!(
+            agent_profile(&invalid)
+                .unwrap_err()
+                .contains("invalid base URL")
+        );
+        assert!(agent_profile(&profile(LlmProtocol::GoogleVertex)).is_err());
+        let mut missing_key = api_profile(LlmProtocol::OpenAiChat);
+        missing_key.api_key.clear();
+        missing_key.auth = LlmAuth::None;
+        assert!(
+            agent_profile(&missing_key)
+                .unwrap_err()
+                .contains("requires the selected API connection's key")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn api_agent_steps_execute_with_child_credentials_and_report_basic_usage() {
+        use crate::plan::types::PlanOutput;
+        use std::os::unix::fs::PermissionsExt;
+
+        for protocol in [LlmProtocol::AnthropicMessages, LlmProtocol::OpenAiChat] {
+            let workspace = tempfile::tempdir().unwrap();
+            let executable = workspace.path().join("mock-agent");
+            let (key, events) = match protocol {
+                LlmProtocol::AnthropicMessages => (
+                    "ANTHROPIC_API_KEY",
+                    r#"{"type":"result","result":"done","usage":{"input_tokens":10,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":5}}"#,
+                ),
+                _ => (
+                    "INXM_AGENT_API_KEY",
+                    "{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":60,\"output_tokens\":5}}",
+                ),
+            };
+            std::fs::write(
+                &executable,
+                format!(
+                    "#!/bin/sh\nIFS= read -r request || :\n[ \"${key}\" = test-key-not-a-real-secret ] || exit 9\nprintf 'executed\\n' > agent-ran\ncat <<'INXM_RESULT'\n{events}\nINXM_RESULT\n"
+                ),
+            ).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let step = PlanStep {
+                id: "agent".to_owned(),
+                name: "agent".to_owned(),
+                description: None,
+                config: StepConfig::AgentCall(AgentCallConfig {
+                    objective: "perform the task".to_owned(),
+                    working_dir: workspace.path().display().to_string(),
+                    timeout_secs: Some(5),
+                }),
+                depends_on: vec![],
+                outputs: vec![PlanOutput {
+                    name: "result".to_owned(),
+                    description: None,
+                    value_type: "string".to_owned(),
+                }],
+                timeout_secs: None,
+                retry: None,
+            };
+            let plan = Plan {
+                metadata: PlanMetadata::new(None),
+                name: "API agent test".to_owned(),
+                description: None,
+                inputs: vec![],
+                config: Default::default(),
+                steps: vec![step.clone()],
+                outputs: vec![],
+            };
+            let mut api = api_profile(protocol);
+            api.executable = executable.display().to_string();
+            let ctx = StepContext {
+                plan: std::sync::Arc::new(plan),
+                step,
+                step_outputs: Default::default(),
+                catalog: Default::default(),
+                global_timeout_secs: Some(5),
+                human: None,
+                run_id: "api-agent-test".to_owned(),
+                progress: None,
+                child_progress: None,
+                llm_keys: crate::executor::LlmKeys {
+                    profile: Some(api),
+                    ..Default::default()
+                },
+                storage_root: workspace.path().to_owned(),
+                agent_audit: Default::default(),
+            };
+            let result = run(&ctx).await.unwrap();
+            assert_eq!(result.outputs["result"], "done");
+            assert_eq!(result.usage.unwrap().total(), 65);
+            assert_eq!(
+                std::fs::read_to_string(workspace.path().join("agent-ran")).unwrap(),
+                "executed\n"
+            );
+            assert!(
+                !result
+                    .stdout
+                    .unwrap()
+                    .contains("test-key-not-a-real-secret")
+            );
+            assert_eq!(ctx.llm_keys.profile.as_ref().unwrap().protocol, protocol);
+        }
     }
 
     #[test]

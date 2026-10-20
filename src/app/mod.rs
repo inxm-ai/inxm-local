@@ -9,6 +9,7 @@
 //! - this file  — the shell: navigation, event routing, layout
 
 pub mod activity;
+pub mod agent_cli;
 pub mod anim;
 pub mod chat_store;
 pub mod commands;
@@ -569,6 +570,9 @@ impl InxmApp {
             mcp: McpState::default(),
             documentation: documentation::DocumentationState::default(),
             settings: SettingsState {
+                installing_cli: None,
+                cli_install_confirmation: None,
+                cli_install_result: None,
                 executable_dir_error: None,
                 draft: settings.clone(),
                 codex_sandbox_test: None,
@@ -1607,6 +1611,24 @@ impl InxmApp {
             },
             EngineEvent::CodexSandboxTestResult(result) => {
                 self.settings.codex_sandbox_test = Some(result);
+            }
+            EngineEvent::AgentCliInstalled { cli, result } => {
+                self.settings.installing_cli = None;
+                match result {
+                    Ok(path) => {
+                        if self.settings.draft.api_agent_cli() == Some(cli) {
+                            self.settings.draft.executable = path.display().to_string();
+                            self.engine.send(EngineCommand::SaveSettings {
+                                settings: Box::new(self.settings.draft.clone()),
+                            });
+                        }
+                        self.settings.cli_install_result =
+                            Some(Ok(format!("{} installed: {}", cli.label(), path.display())));
+                    }
+                    Err(message) => {
+                        self.settings.cli_install_result = Some(Err(message));
+                    }
+                }
             }
             EngineEvent::McpOAuthStatus { tool_name, status } => {
                 if !mcp_event_targets_draft(&self.mcp, &tool_name) {

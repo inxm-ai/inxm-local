@@ -95,6 +95,9 @@ pub enum SettingsAction {
 #[derive(Default)]
 pub struct SettingsState {
     pub draft: AppSettings,
+    pub installing_cli: Option<crate::app::agent_cli::AgentCli>,
+    pub cli_install_confirmation: Option<crate::app::agent_cli::AgentCli>,
+    pub cli_install_result: Option<Result<String, String>>,
     pub executable_dir_error: Option<String>,
     /// Result of the last "Test sandbox" probe, if one has been run this session.
     pub codex_sandbox_test: Option<Result<(), String>>,
@@ -361,7 +364,7 @@ pub fn show(
                 if matches!(
                     state.draft.backend,
                     BackendChoice::Codex | BackendChoice::ClaudeCode
-                ) {
+                ) || state.draft.api_agent_cli().is_some() {
                     ui.label(RichText::new("CLI executable").color(theme::text_muted()));
                     if widgets::text_edit(
                         ui,
@@ -377,13 +380,19 @@ pub fn show(
                     }
                     widgets::wrapped_label(
                         ui,
-                        RichText::new("Sign in with the selected CLI before using this connection.")
+                        RichText::new(if state.draft.api_agent_cli().is_some() {
+                            "Used only for agent steps. The selected API key is passed to the agent process; no separate CLI login is needed. Prompt steps keep using the API."
+                        } else {
+                            "Sign in with the selected CLI before using this connection."
+                        })
                             .size(theme::FONT_SMALL)
                             .color(theme::text_faint()),
                     );
                     ui.add_space(8.0);
 
-                    if state.draft.backend == BackendChoice::Codex {
+                    if state.draft.backend == BackendChoice::Codex
+                        || state.draft.api_agent_cli() == Some(crate::app::agent_cli::AgentCli::Codex)
+                    {
                         ui.separator();
                         ui.add_space(8.0);
                         ui.label(RichText::new("Sandbox mode").color(theme::text_muted()));
@@ -411,37 +420,39 @@ pub fn show(
                             });
                         }
                         ui.add_space(6.0);
-                        ui.horizontal(|ui| {
-                            if widgets::ghost_button(ui, "Test sandbox").clicked() {
-                                engine.send(EngineCommand::TestCodexSandbox {
-                                    executable: state.draft.executable.clone(),
-                                });
-                            }
-                            match &state.codex_sandbox_test {
-                                Some(Ok(())) => {
-                                    ui.label(
-                                        RichText::new("✓ Codex's sandbox initializes correctly")
-                                            .size(theme::FONT_SMALL)
-                                            .color(theme::ok()),
-                                    );
+                        if state.draft.backend == BackendChoice::Codex {
+                            ui.horizontal(|ui| {
+                                if widgets::ghost_button(ui, "Test sandbox").clicked() {
+                                    engine.send(EngineCommand::TestCodexSandbox {
+                                        executable: state.draft.executable.clone(),
+                                    });
                                 }
-                                Some(Err(_)) => {
-                                    ui.label(
-                                        RichText::new("✗ Codex's sandbox failed to start — see below")
-                                            .size(theme::FONT_SMALL)
-                                            .color(theme::warn()),
-                                    );
+                                match &state.codex_sandbox_test {
+                                    Some(Ok(())) => {
+                                        ui.label(
+                                            RichText::new("✓ Codex's sandbox initializes correctly")
+                                                .size(theme::FONT_SMALL)
+                                                .color(theme::ok()),
+                                        );
+                                    }
+                                    Some(Err(_)) => {
+                                        ui.label(
+                                            RichText::new("✗ Codex's sandbox failed to start — see below")
+                                                .size(theme::FONT_SMALL)
+                                                .color(theme::warn()),
+                                        );
+                                    }
+                                    None => {}
                                 }
-                                None => {}
+                            });
+                            if let Some(Err(message)) = &state.codex_sandbox_test {
+                                widgets::wrapped_label(
+                                    ui,
+                                    RichText::new(message)
+                                        .size(theme::FONT_SMALL)
+                                        .color(theme::warn()),
+                                );
                             }
-                        });
-                        if let Some(Err(message)) = &state.codex_sandbox_test {
-                            widgets::wrapped_label(
-                                ui,
-                                RichText::new(message)
-                                    .size(theme::FONT_SMALL)
-                                    .color(theme::warn()),
-                            );
                         }
                         ui.add_space(8.0);
                     }
@@ -616,7 +627,7 @@ pub fn show(
                     "Agent steps are disabled."
                 } else {
                     "This connection is completion-only. Select OpenAI account, Claude account, \
-                     or an agent-shaped Custom CLI to use agent steps."
+                     Claude API, OpenAI API, or an agent-shaped Custom CLI to use agent steps."
                 };
                 widgets::wrapped_label(
                     ui,
@@ -628,6 +639,56 @@ pub fn show(
                             theme::text_faint()
                         }),
                 );
+                if let Some(cli) = state.draft.api_agent_cli() {
+                    ui.add_space(8.0);
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(format!(
+                            "Agent steps launch {} using this connection's API key and model. API usage is billed to that key. The model must support the agent CLI; Codex requires a Responses API-compatible model.",
+                            cli.label()
+                        ))
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_muted()),
+                    );
+                    if let Some(installing) = state.installing_cli {
+                        ui.spinner();
+                        ui.label(format!("Installing {}...", installing.label()));
+                    } else if widgets::ghost_button(ui, &format!("Install {} CLI", cli.label())).clicked() {
+                        state.cli_install_confirmation = Some(cli);
+                        state.cli_install_result = None;
+                    }
+                    if state.cli_install_confirmation == Some(cli) {
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(format!(
+                                "Install {} using npm install --global {}? This downloads and executes third-party package code and changes your global npm installation. Node.js and npm are required. Existing CLI logins will not be changed.",
+                                cli.label(), cli.package()
+                            ))
+                            .size(theme::FONT_SMALL)
+                            .color(theme::warn()),
+                        );
+                        ui.horizontal(|ui| {
+                            if widgets::primary_button(ui, "Confirm installation").clicked() {
+                                state.cli_install_confirmation = None;
+                                state.installing_cli = Some(cli);
+                                engine.send(EngineCommand::InstallAgentCli { cli });
+                            }
+                            if widgets::ghost_button(ui, "Cancel").clicked() {
+                                state.cli_install_confirmation = None;
+                            }
+                        });
+                    }
+                    if let Some(result) = &state.cli_install_result {
+                        let (message, color) = match result {
+                            Ok(message) => (message, theme::ok()),
+                            Err(message) => (message, theme::warn()),
+                        };
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(message).size(theme::FONT_SMALL).color(color),
+                        );
+                    }
+                }
             });
 
             ui.add_space(12.0);

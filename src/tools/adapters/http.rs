@@ -131,6 +131,12 @@ async fn execute_with_retries(
                     continue;
                 }
 
+                let content_type = response
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("not supplied")
+                    .to_owned();
                 let body = read_body_limited(response, url).await?;
 
                 if !status.is_success() {
@@ -146,7 +152,20 @@ async fn execute_with_retries(
                     });
                 }
 
-                let data = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+                let data = match serde_json::from_str(&body) {
+                    Ok(data) => data,
+                    Err(error) if requires_json(config) => {
+                        return Err(ToolError::Execution {
+                            tool: url.to_owned(),
+                            message: format!(
+                                "expected a JSON response because Accept is application/json, \
+                                 but the response was not valid JSON (Content-Type: {content_type}): \
+                                 {error}. Check the endpoint and its response-format requirements."
+                            ),
+                        });
+                    }
+                    Err(_) => serde_json::Value::Null,
+                };
 
                 return Ok(ToolOutput {
                     stdout: body,
@@ -171,6 +190,12 @@ async fn execute_with_retries(
             }
         }
     }
+}
+
+fn requires_json(config: &HttpConfig) -> bool {
+    config.headers.iter().any(|(name, value)| {
+        name.eq_ignore_ascii_case("accept") && value.trim().eq_ignore_ascii_case("application/json")
+    })
 }
 
 async fn read_body_limited(
@@ -423,6 +448,62 @@ mod tests {
         run(&config(url), &IndexMap::new(), None).await.unwrap();
         let request = request.await.unwrap().to_ascii_lowercase();
         assert!(request.contains("user-agent: inxm-local/"));
+    }
+
+    #[tokio::test]
+    async fn json_fetch_sends_accept_and_parses_response() {
+        let (url, request) =
+            one_shot_server("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"joke\":\"Hi!\"}")
+                .await;
+        let mut cfg = config(url);
+        cfg.headers
+            .insert("Accept".to_owned(), "application/json".to_owned());
+
+        let output = run(&cfg, &IndexMap::new(), None).await.unwrap();
+
+        assert_eq!(output.data, serde_json::json!({"joke": "Hi!"}));
+        assert_eq!(output.stdout, r#"{"joke":"Hi!"}"#);
+        assert!(
+            request
+                .await
+                .unwrap()
+                .to_ascii_lowercase()
+                .contains("accept: application/json")
+        );
+    }
+
+    #[tokio::test]
+    async fn json_fetch_rejects_html_empty_and_malformed_responses() {
+        for response in [
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<!DOCTYPE html>",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1\r\nConnection: close\r\n\r\n{",
+        ] {
+            let (url, request) = one_shot_server(response).await;
+            let mut cfg = config(url);
+            cfg.headers
+                .insert("accept".to_owned(), "Application/JSON".to_owned());
+
+            let error = run(&cfg, &IndexMap::new(), None).await.unwrap_err();
+
+            assert!(error.to_string().contains("expected a JSON response"));
+            assert!(error.to_string().contains("Content-Type:"));
+            request.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_fetch_preserves_html_responses() {
+        let (url, request) = one_shot_server(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 15\r\nConnection: close\r\n\r\n<!DOCTYPE html>",
+        )
+        .await;
+
+        let output = run(&config(url), &IndexMap::new(), None).await.unwrap();
+
+        assert_eq!(output.stdout, "<!DOCTYPE html>");
+        assert!(output.data.is_null());
+        request.await.unwrap();
     }
 
     #[tokio::test]

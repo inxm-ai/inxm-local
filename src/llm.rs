@@ -428,7 +428,7 @@ pub async fn complete(
     }
 }
 
-fn resolved_key(profile: &LlmProfile) -> Option<String> {
+pub(crate) fn resolved_key(profile: &LlmProfile) -> Option<String> {
     if !profile.api_key.trim().is_empty() {
         return Some(profile.api_key.trim().to_owned());
     }
