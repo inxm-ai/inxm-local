@@ -71,6 +71,12 @@ folders before detecting available programs. Compiler and repair context see
 that environment too; repair does not install software or silently change it.
 An explicit tool or MCP server `PATH` remains authoritative.
 
+For subprocess tools and Local stdio MCP servers, an explicit `PATH` controls
+both launcher lookup and the child's environment, without falling back to the
+app's executable folders. Relative `PATH` entries resolve from the child's
+working directory. On Windows, an explicit `PATHEXT` also controls launcher
+extensions. An absolute launcher path is used directly.
+
 Subprocess tools, Local stdio MCP servers, AI-generated code steps, and agent CLIs run as programs on your machine. Each program always receives:
 
 | Source | What is passed |
