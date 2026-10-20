@@ -94,12 +94,7 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         "external runner completed"
     );
 
-    let usage_recording_enabled = if crate::llm::is_anthropic_api(&profile.base_url) {
-        crate::executor::usage::current_usage_enabled()
-    } else {
-        None
-    };
-    let usage = token_usage(&response, usage_recording_enabled);
+    let usage = token_usage(&response);
     let mut outputs = IndexMap::new();
     outputs.insert(
         cfg.output_field.clone(),
@@ -115,14 +110,9 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
 }
 
 /// Step token usage for the run summary. Claude input includes cache reads
-/// and writes; usage is kept when either count was reported.
-fn token_usage(
-    response: &crate::llm::CompletionResponse,
-    usage_recording_enabled: Option<bool>,
-) -> Option<TokenUsage> {
-    if response.usage.is_some() && usage_recording_enabled == Some(false) {
-        return None;
-    }
+/// and writes; usage is kept independently of detailed recording when either
+/// count was reported.
+fn token_usage(response: &crate::llm::CompletionResponse) -> Option<TokenUsage> {
     let input = response
         .usage
         .as_ref()
@@ -211,19 +201,16 @@ mod tests {
 
     #[test]
     fn claude_input_includes_cache_reads_and_writes() {
-        let usage = token_usage(
-            &response(
-                Some(10),
-                Some(5),
-                Some(serde_json::json!({
-                    "input_tokens": 10,
-                    "output_tokens": 5,
-                    "cache_creation_input_tokens": 20,
-                    "cache_read_input_tokens": 300
-                })),
-            ),
-            Some(true),
-        )
+        let usage = token_usage(&response(
+            Some(10),
+            Some(5),
+            Some(serde_json::json!({
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 300
+            })),
+        ))
         .unwrap();
         assert_eq!(usage.input_tokens, 330);
         assert_eq!(usage.output_tokens, 5);
@@ -231,20 +218,32 @@ mod tests {
 
     #[test]
     fn output_only_usage_is_kept() {
-        let usage = token_usage(&response(None, Some(7), None), Some(true)).unwrap();
+        let usage = token_usage(&response(None, Some(7), None)).unwrap();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.output_tokens, 7);
-        assert!(token_usage(&response(None, None, None), Some(true)).is_none());
+        assert!(token_usage(&response(None, None, None)).is_none());
     }
 
     #[test]
     fn non_claude_usage_falls_back_to_reported_counts() {
-        let usage = token_usage(&response(Some(4), Some(2), None), Some(false)).unwrap();
+        let usage = token_usage(&response(Some(4), Some(2), None)).unwrap();
         assert_eq!(usage.total(), 6);
     }
 
-    #[test]
-    fn disabled_usage_recording_suppresses_claude_token_totals() {
+    #[tokio::test]
+    async fn disabled_detailed_recording_preserves_basic_claude_usage_in_run_records() {
+        use crate::executor::usage::{RunUsageRecorder, with_attempt_usage};
+        use crate::storage::StorageRoot;
+        use crate::storage::runs::{Run, RunStore, StepRun};
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageRoot::open(dir.path()).unwrap());
+        let mut run = Run::new("plan-a", 1);
+        run.step_runs
+            .insert("summarize".to_owned(), StepRun::new("summarize"));
+        let recorder =
+            RunUsageRecorder::for_attempt(Arc::clone(&storage), false, false, &run, "summarize", 1);
         let response = response(
             Some(10),
             Some(5),
@@ -255,23 +254,19 @@ mod tests {
             })),
         );
 
-        assert!(token_usage(&response, Some(false)).is_none());
-    }
-
-    #[test]
-    fn disabled_recording_does_not_hide_compatible_endpoint_summaries() {
-        let response = response(
-            Some(10),
-            Some(5),
-            Some(serde_json::json!({
-                "input_tokens": 10,
-                "output_tokens": 5,
-                "cache_read_input_tokens": 300
-            })),
-        );
-
-        let usage = token_usage(&response, None).unwrap();
+        let usage = with_attempt_usage(Arc::clone(&recorder), async { token_usage(&response) })
+            .await
+            .unwrap();
         assert_eq!(usage.input_tokens, 310);
         assert_eq!(usage.output_tokens, 5);
+        run.step_runs["summarize"].token_usage = Some(usage);
+        recorder.drain_into(&mut run);
+
+        let runs = RunStore::new(storage.runs_dir());
+        runs.save(&run).unwrap();
+        let loaded = runs.load(&run.id).unwrap();
+        assert_eq!(loaded.token_usage_summary().usage.total(), 315);
+        assert!(loaded.step_runs["summarize"].claude_calls.is_empty());
+        assert!(storage.llm_usage().read_all().unwrap().is_empty());
     }
 }
