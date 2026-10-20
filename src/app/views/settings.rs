@@ -222,7 +222,7 @@ pub fn show(
                     widgets::wrapped_label(
                         ui,
                         RichText::new(
-                            "Records provider-reported token totals for direct Anthropic API calls and shows them in plan and run summaries. Turning this off does not delete existing local usage history.",
+                            "Records detailed provider-reported usage for direct Anthropic API calls and shows it in plan and run summaries. Basic per-step token counts remain available when this is off. Turning this off does not delete existing local usage history.",
                         )
                         .size(theme::FONT_SMALL)
                         .color(theme::text_faint()),
