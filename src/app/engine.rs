@@ -149,6 +149,25 @@ const DEFAULT_CATALOG_YAML: &str = r#"tools:
           type: string
     allowlisted: true
 
+  - name: http-get-json
+    description: Fetch JSON from a URL with Accept application/json; fails if the response is not valid JSON
+    config:
+      kind: http
+      base_url: ""
+      method: GET
+      path_template: "{url}"
+      headers:
+        Accept: application/json
+      timeout_secs: 60
+    input_schema:
+      type: object
+      properties:
+        url:
+          type: string
+      required: [url]
+    output_schema: {}
+    allowlisted: true
+
   - name: current-time
     description: Current date and time for a timezone (reference MCP time server, needs uvx)
     config:
@@ -520,16 +539,32 @@ impl AppSettings {
     }
 
     /// Whether plans may contain AGENT_CALL steps under this configuration.
-    /// API backends remain completion-only even when the experimental toggle
-    /// is enabled; only account CLIs and an explicitly agent-shaped custom CLI
-    /// provide the real tool-using execution loop that the step promises.
+    /// Direct API connections delegate agent steps to the matching CLI while
+    /// keeping compilation and prompt steps on the API transport.
     pub fn supports_agent_call(&self) -> bool {
         self.experimental_agent_calls
             && match self.backend {
-                BackendChoice::Codex | BackendChoice::ClaudeCode => true,
+                BackendChoice::Codex
+                | BackendChoice::ClaudeCode
+                | BackendChoice::Claude
+                | BackendChoice::OpenAi => true,
+                BackendChoice::Auto => self.resolved_kind().is_some(),
                 BackendChoice::CustomCli => self.custom_cli_agentic,
                 _ => false,
             }
+    }
+
+    pub(crate) fn api_agent_cli(&self) -> Option<super::agent_cli::AgentCli> {
+        use super::agent_cli::AgentCli;
+        match self.backend {
+            BackendChoice::Claude => Some(AgentCli::Claude),
+            BackendChoice::OpenAi => Some(AgentCli::Codex),
+            BackendChoice::Auto => match self.resolved_kind()? {
+                BackendKind::Claude => Some(AgentCli::Claude),
+                BackendKind::OpenAI => Some(AgentCli::Codex),
+            },
+            _ => None,
+        }
     }
 
     /// Load settings, falling back to defaults when the file is missing or
@@ -739,7 +774,12 @@ impl AppSettings {
 fn uses_executable_override(backend: BackendChoice) -> bool {
     matches!(
         backend,
-        BackendChoice::Codex | BackendChoice::ClaudeCode | BackendChoice::GoogleVertex
+        BackendChoice::Auto
+            | BackendChoice::Claude
+            | BackendChoice::OpenAi
+            | BackendChoice::Codex
+            | BackendChoice::ClaudeCode
+            | BackendChoice::GoogleVertex
     )
 }
 
@@ -754,8 +794,10 @@ fn compatible_executable(backend: BackendChoice, configured: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let mismatched = matches!(backend, BackendChoice::Codex) && file_name == "claude"
-        || matches!(backend, BackendChoice::ClaudeCode) && file_name == "codex";
+    let mismatched = matches!(backend, BackendChoice::Codex | BackendChoice::OpenAi)
+        && file_name == "claude"
+        || matches!(backend, BackendChoice::ClaudeCode | BackendChoice::Claude)
+            && file_name == "codex";
     if mismatched {
         String::new()
     } else {
@@ -771,7 +813,7 @@ pub(crate) fn ensure_agent_call_allowed(plan: &Plan, settings: &AppSettings) -> 
         && !settings.supports_agent_call()
     {
         anyhow::bail!(
-            "this plan contains experimental AGENT_CALL steps, but this system is not configured to run them — enable Experimental agent steps in Settings and select OpenAI account, Claude account, or an explicitly agent-shaped Custom CLI"
+            "this plan contains experimental AGENT_CALL steps, but this system is not configured to run them — enable Experimental agent steps in Settings and select Claude API, OpenAI API, OpenAI account, Claude account, or an explicitly agent-shaped Custom CLI"
         );
     }
     Ok(())
@@ -974,6 +1016,9 @@ pub enum EngineCommand {
     TestCodexSandbox {
         executable: String,
     },
+    InstallAgentCli {
+        cli: super::agent_cli::AgentCli,
+    },
     /// Query the secure-vault connection state for a remote MCP endpoint.
     CheckMcpOAuthStatus {
         tool_name: String,
@@ -1081,6 +1126,7 @@ impl EngineCommandTrace {
             EngineCommand::CreateSupportTicket { .. } => "create_support_ticket",
             EngineCommand::CheckForUpdates { .. } => "check_for_updates",
             EngineCommand::TestCodexSandbox { .. } => "test_codex_sandbox",
+            EngineCommand::InstallAgentCli { .. } => "install_agent_cli",
             EngineCommand::CheckMcpOAuthStatus { .. } => "mcp_oauth_status",
             EngineCommand::BeginMcpOAuth { .. } => "mcp_oauth_begin",
             EngineCommand::CancelMcpOAuth { .. } => "mcp_oauth_cancel",
@@ -1410,6 +1456,10 @@ pub enum EngineEvent {
     /// Codex's OS sandbox initialized cleanly, `Err` with a remediation hint
     /// otherwise.
     CodexSandboxTestResult(Result<(), String>),
+    AgentCliInstalled {
+        cli: super::agent_cli::AgentCli,
+        result: Result<std::path::PathBuf, String>,
+    },
     /// OAuth connection state for one outbound remote MCP tool.
     McpOAuthStatus {
         tool_name: String,
@@ -2176,6 +2226,14 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         EngineCommand::TestCodexSandbox { executable } => {
             let result = crate::llm::test_codex_sandbox(&executable).await;
             env.emit(EngineEvent::CodexSandboxTestResult(result));
+            Ok(())
+        }
+        EngineCommand::InstallAgentCli { cli } => {
+            let result = super::agent_cli::install(cli).await;
+            if let Err(error) = &result {
+                tracing::warn!(cli = cli.program(), %error, "agent CLI installation failed");
+            }
+            env.emit(EngineEvent::AgentCliInstalled { cli, result });
             Ok(())
         }
         EngineCommand::CheckMcpOAuthStatus {
@@ -3012,8 +3070,7 @@ fn bootstrap(env: &EngineEnv) -> anyhow::Result<()> {
                 persist_catalog_updates(env, &migrated)?;
             }
 
-            // Older catalogs also predate the native HTTP adapter. Add a generic
-            // GET tool so planners do not need to guess whether curl exists.
+            // Add missing native GET tools without changing existing entries.
             if env.catalog_snapshot().is_ok() {
                 if let Some(migrated) = add_native_http_get_migration(&env.catalog()?) {
                     persist_catalog_updates(env, &migrated)?;
@@ -5295,11 +5352,16 @@ fn tool_is_runnable(entry: &ToolEntry) -> bool {
 }
 
 fn add_native_http_get_migration(catalog: &ToolCatalog) -> Option<ToolCatalog> {
-    (!catalog.contains("http-get")).then(|| {
-        let mut entries: Vec<ToolEntry> = catalog.all().cloned().collect();
-        entries.push(native_http_get_tool());
-        ToolCatalog::new(entries)
-    })
+    let missing: Vec<ToolEntry> = [native_http_get_tool(), native_http_get_json_tool()]
+        .into_iter()
+        .filter(|entry| !catalog.contains(&entry.name))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let mut entries: Vec<ToolEntry> = catalog.all().cloned().collect();
+    entries.extend(missing);
+    Some(ToolCatalog::new(entries))
 }
 
 /// Launcher for the reference MCP servers, and the version constraint they need.
@@ -5379,6 +5441,19 @@ fn native_http_get_tool() -> ToolEntry {
         allowlisted: true,
         timeout_secs: Some(60),
     }
+}
+
+fn native_http_get_json_tool() -> ToolEntry {
+    let mut entry = native_http_get_tool();
+    entry.name = "http-get-json".to_owned();
+    entry.description = "Fetch JSON from a URL with Accept application/json; fails if the response is not valid JSON".to_owned();
+    if let ToolConfig::Http(config) = &mut entry.config {
+        config
+            .headers
+            .insert("Accept".to_owned(), "application/json".to_owned());
+    }
+    entry.output_schema = serde_json::json!({});
+    entry
 }
 
 // ─── Lookup helpers ───────────────────────────────────────────────────────────
@@ -6597,7 +6672,12 @@ mod tests {
 
     #[test]
     fn agent_call_requires_opt_in_and_an_agent_backend() {
-        for backend in [BackendChoice::Codex, BackendChoice::ClaudeCode] {
+        for backend in [
+            BackendChoice::Codex,
+            BackendChoice::ClaudeCode,
+            BackendChoice::Claude,
+            BackendChoice::OpenAi,
+        ] {
             let mut settings = AppSettings {
                 backend,
                 ..AppSettings::default()
@@ -6608,9 +6688,6 @@ mod tests {
         }
 
         for backend in [
-            BackendChoice::Auto,
-            BackendChoice::Claude,
-            BackendChoice::OpenAi,
             BackendChoice::GoogleVertex,
             BackendChoice::OpenAiCompatible,
             BackendChoice::AnthropicCompatible,
@@ -6634,6 +6711,137 @@ mod tests {
         assert!(!custom.supports_agent_call());
         custom.custom_cli_agentic = true;
         assert!(custom.supports_agent_call());
+    }
+
+    #[test]
+    fn api_agent_routing_preserves_prompt_transport_and_uses_matching_installer() {
+        for (backend, protocol, cli) in [
+            (
+                BackendChoice::Claude,
+                LlmProtocol::AnthropicMessages,
+                super::super::agent_cli::AgentCli::Claude,
+            ),
+            (
+                BackendChoice::OpenAi,
+                LlmProtocol::OpenAiChat,
+                super::super::agent_cli::AgentCli::Codex,
+            ),
+        ] {
+            let settings = AppSettings {
+                backend,
+                api_key: "test-api-key".to_owned(),
+                experimental_agent_calls: true,
+                ..AppSettings::default()
+            };
+            assert!(settings.supports_agent_call());
+            assert_eq!(settings.api_agent_cli(), Some(cli));
+            assert_eq!(llm_keys_from(&settings).profile.unwrap().protocol, protocol);
+            let mut changed = settings;
+            changed.executable = "/provider-specific/agent".to_owned();
+            changed.select_backend(if backend == BackendChoice::Claude {
+                BackendChoice::OpenAi
+            } else {
+                BackendChoice::Claude
+            });
+            assert!(changed.executable.is_empty());
+        }
+    }
+
+    #[test]
+    fn api_agent_installation_ui_requires_explicit_confirmation() {
+        use crate::app::agent_cli::AgentCli;
+        use crate::app::views::settings::{self, SettingsState};
+
+        fn text_center(
+            shapes: &[egui::epaint::ClippedShape],
+            expected: &str,
+        ) -> Option<egui::Pos2> {
+            fn find(shape: &egui::Shape, expected: &str) -> Option<egui::Pos2> {
+                match shape {
+                    egui::Shape::Text(text) if text.galley.job.text == expected => {
+                        Some(egui::Rect::from_min_size(text.pos, text.galley.size()).center())
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        shapes.iter().find_map(|shape| find(shape, expected))
+                    }
+                    _ => None,
+                }
+            }
+            shapes.iter().find_map(|shape| find(&shape.shape, expected))
+        }
+
+        let _guard = crate::app::theme::test_mode_lock();
+        for (backend, cli) in [
+            (BackendChoice::Claude, AgentCli::Claude),
+            (BackendChoice::OpenAi, AgentCli::Codex),
+        ] {
+            let ctx = egui::Context::default();
+            crate::app::theme::apply(&ctx, true);
+            let mut state = SettingsState {
+                draft: AppSettings {
+                    backend,
+                    experimental_agent_calls: true,
+                    ..AppSettings::default()
+                },
+                ..Default::default()
+            };
+            let (cmd_tx, mut commands) = tokio::sync::mpsc::unbounded_channel();
+            let engine = EngineHandle {
+                cmd_tx,
+                session_id: None,
+            };
+            let update = crate::app::update_controller::UpdateController::default();
+            let mut draw = |click: Option<egui::Pos2>| {
+                let mut input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1400.0, 3000.0),
+                    )),
+                    ..Default::default()
+                };
+                if let Some(pos) = click {
+                    input.events.push(egui::Event::PointerMoved(pos));
+                    for pressed in [true, false] {
+                        input.events.push(egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::default(),
+                        });
+                    }
+                }
+                ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        settings::show(
+                            ui,
+                            &mut state,
+                            "",
+                            &super::super::mcp_server::ServerStatus::Starting { port: 39387 },
+                            &engine,
+                            None,
+                            &update,
+                        );
+                    });
+                })
+            };
+            let _ = draw(None);
+            let output = draw(None);
+            let install = text_center(&output.shapes, &format!("Install {} CLI", cli.label()))
+                .expect("install action");
+            let _ = draw(Some(install));
+            assert!(
+                commands.try_recv().is_err(),
+                "opening confirmation must not install"
+            );
+            let output = draw(None);
+            let confirm =
+                text_center(&output.shapes, "Confirm installation").expect("confirmation action");
+            let _ = draw(Some(confirm));
+            assert!(
+                matches!(commands.try_recv().unwrap().command, EngineCommand::InstallAgentCli { cli: selected } if selected == cli)
+            );
+            assert_eq!(state.installing_cli, Some(cli));
+        }
     }
 
     #[test]
@@ -7006,6 +7214,61 @@ mod tests {
             other => panic!("expected http config, got {other:?}"),
         }
         assert!(add_native_http_get_migration(&migrated).is_none());
+    }
+
+    #[test]
+    fn native_http_get_json_is_added_without_changing_existing_tools() {
+        let mut original = native_http_get_tool();
+        original.allowlisted = false;
+        original.description = "User's page fetcher".to_owned();
+        let catalog = ToolCatalog::new(vec![original.clone()]);
+
+        let migrated = add_native_http_get_migration(&catalog).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(migrated.get("http-get").unwrap()).unwrap(),
+            serde_json::to_value(original).unwrap()
+        );
+        let json_tool = migrated.get("http-get-json").unwrap();
+        match &json_tool.config {
+            ToolConfig::Http(config) => {
+                assert_eq!(config.headers["Accept"], "application/json");
+                assert_eq!(config.path_template, "{url}");
+            }
+            other => panic!("expected HTTP config, got {other:?}"),
+        }
+        assert_eq!(json_tool.output_schema, serde_json::json!({}));
+        assert!(json_tool.allowlisted);
+        assert!(add_native_http_get_migration(&migrated).is_none());
+    }
+
+    #[test]
+    fn native_http_get_json_migration_preserves_existing_json_tool() {
+        let mut existing = native_http_get_json_tool();
+        existing.allowlisted = false;
+        existing.description = "User's JSON fetcher".to_owned();
+        let catalog = ToolCatalog::new(vec![native_http_get_tool(), existing.clone()]);
+
+        assert!(add_native_http_get_migration(&catalog).is_none());
+        assert_eq!(
+            serde_json::to_value(catalog.get("http-get-json").unwrap()).unwrap(),
+            serde_json::to_value(existing).unwrap()
+        );
+    }
+
+    #[test]
+    fn seeded_native_http_tools_match_migration_contracts() {
+        let catalog = ToolCatalog::load_from_yaml(&default_catalog_yaml()).unwrap();
+        for expected in [native_http_get_tool(), native_http_get_json_tool()] {
+            let seeded = catalog.get(&expected.name).unwrap();
+            assert_eq!(
+                serde_json::to_value(&seeded.config).unwrap(),
+                serde_json::to_value(&expected.config).unwrap()
+            );
+            assert_eq!(seeded.input_schema, expected.input_schema);
+            assert_eq!(seeded.output_schema, expected.output_schema);
+        }
+        assert!(add_native_http_get_migration(&catalog).is_none());
     }
 
     /// A catalog seeded before the pin launches `mcp-server-time` against

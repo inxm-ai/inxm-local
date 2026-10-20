@@ -97,7 +97,7 @@ pub struct HumanRequest {
     pub respond: tokio::sync::oneshot::Sender<HumanDecision>,
 }
 
-/// API keys for PROMPT_CALL steps. Each slot falls back to its environment
+/// LLM connection and API keys for prompt and agent steps. Each slot falls back to its environment
 /// variable (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) when `None`.
 #[derive(Debug, Clone, Default)]
 pub struct LlmKeys {
@@ -125,7 +125,7 @@ pub struct ExecutorConfig {
     pub progress: Option<tokio::sync::mpsc::UnboundedSender<ProgressEvent>>,
     /// Optional channel for HUMAN_INTERACTION prompts; stdin fallback when `None`.
     pub human: Option<tokio::sync::mpsc::UnboundedSender<HumanRequest>>,
-    /// Credentials for PROMPT_CALL steps (env-var fallback when unset).
+    /// LLM connection and credentials for prompt and agent steps.
     pub llm_keys: LlmKeys,
     /// Whether Claude API usage is recorded for this execution.
     pub claude_usage_enabled: bool,

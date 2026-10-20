@@ -8,7 +8,9 @@ use inxm_local::executor::{
 use chrono::Utc;
 use inxm_local::plan::types::*;
 use inxm_local::storage::{StorageRoot, runs::RunStatus, runs::StepRunStatus};
-use inxm_local::tools::catalog::{SubprocessConfig, ToolCatalog, ToolConfig, ToolEntry};
+use inxm_local::tools::catalog::{
+    HttpConfig, SubprocessConfig, ToolCatalog, ToolConfig, ToolEntry,
+};
 use std::sync::Arc;
 
 fn echo_catalog() -> ToolCatalog {
@@ -398,6 +400,157 @@ async fn code_call_passes_step_output_through_static_script_stdin() {
         &serde_json::json!("hello_world"),
         "structured stdin did not receive the resolved prior-step output"
     );
+}
+
+#[tokio::test]
+async fn json_http_fetch_to_parser_validates_response_before_running_script() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for (content_type, body, succeeds) in [
+        ("application/json", r#"{"joke":"A test joke."}"#, true),
+        ("text/html", "<!DOCTYPE html><title>API docs</title>", false),
+        ("application/json", "", false),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8192];
+            let size = stream.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request[..size].to_vec()).unwrap()
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(StorageRoot::open(dir.path()).unwrap());
+        let catalog = ToolCatalog::new(vec![ToolEntry {
+            name: "http-get-json".to_owned(),
+            description: "Fetch JSON".to_owned(),
+            config: ToolConfig::Http(HttpConfig {
+                base_url: String::new(),
+                method: "GET".to_owned(),
+                path_template: "{url}".to_owned(),
+                headers: [("Accept".to_owned(), "application/json".to_owned())].into(),
+                timeout_secs: Some(5),
+            }),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {"url": {"type": "string"}},
+                "required": ["url"]
+            }),
+            output_schema: serde_json::json!({}),
+            allowlisted: true,
+            timeout_secs: Some(5),
+        }]);
+        let plan = Plan {
+            metadata: PlanMetadata::new(None),
+            name: "Fetch and parse JSON".to_owned(),
+            description: None,
+            inputs: vec![PlanInput {
+                name: ROOT_DIRECTORY_INPUT.to_owned(),
+                description: None,
+                value_type: "string".to_owned(),
+                required: false,
+                default: None,
+                input_kind: InputKind::DirectoryPath,
+            }],
+            config: Default::default(),
+            steps: vec![
+                PlanStep {
+                    id: "fetch".to_owned(),
+                    name: "Fetch JSON".to_owned(),
+                    description: None,
+                    config: StepConfig::ToolCall(ToolCallConfig {
+                        tool: "http-get-json".to_owned(),
+                        arguments: [("url".to_owned(), serde_json::json!(url))].into(),
+                    }),
+                    depends_on: vec![],
+                    outputs: vec![PlanOutput {
+                        name: "response".to_owned(),
+                        description: None,
+                        value_type: "object".to_owned(),
+                    }],
+                    timeout_secs: Some(5),
+                    retry: None,
+                },
+                PlanStep {
+                    id: "parse_joke".to_owned(),
+                    name: "Parse joke".to_owned(),
+                    description: None,
+                    config: StepConfig::CodeCall(CodeCallConfig {
+                        language: "python".to_owned(),
+                        inline: Some(
+                            "import json, sys\n\
+                             data = json.load(sys.stdin)\n\
+                             print(json.dumps({'formatted_joke': 'Dad joke: ' + data['joke']}))"
+                                .to_owned(),
+                        ),
+                        file: None,
+                        args: vec![],
+                        stdin: Some("${step.fetch.response}".to_owned()),
+                        env: Default::default(),
+                        working_dir: Some("${input.root_directory}".to_owned()),
+                        timeout_secs: Some(5),
+                    }),
+                    depends_on: vec!["fetch".to_owned()],
+                    outputs: vec![PlanOutput {
+                        name: "formatted_joke".to_owned(),
+                        description: None,
+                        value_type: "string".to_owned(),
+                    }],
+                    timeout_secs: Some(5),
+                    retry: None,
+                },
+            ],
+            outputs: vec![PlanOutputRef {
+                name: "joke".to_owned(),
+                description: None,
+                source: "${step.parse_joke.formatted_joke}".to_owned(),
+            }],
+        };
+        assert!(inxm_local::validator::validate(&plan, &catalog).is_empty());
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let result = execute(
+            plan,
+            ExecutorConfig {
+                inputs: Default::default(),
+                timeout_secs: Some(10),
+                storage: storage.clone(),
+                catalog,
+                progress: Some(progress_tx),
+                human: None,
+                llm_keys: Default::default(),
+                claude_usage_enabled: false,
+                claude_prompts_enabled: false,
+                source: None,
+            },
+        )
+        .await;
+        let event = progress_rx.try_recv().unwrap();
+        let persisted = storage.runs().load(&event.run_id).unwrap();
+        let request = server.await.unwrap().to_ascii_lowercase();
+        assert!(request.contains("accept: application/json"));
+        if succeeds {
+            let run = result.expect("JSON should reach the parser intact");
+            assert_eq!(
+                run.outputs["joke"],
+                serde_json::json!("Dad joke: A test joke.")
+            );
+            assert_eq!(persisted.outputs, run.outputs);
+        } else {
+            let error = result.expect_err("non-JSON must fail at the fetch step");
+            assert!(error.to_string().contains("expected a JSON response"));
+            assert_eq!(persisted.step_runs["fetch"].status, StepRunStatus::Failed);
+            assert_eq!(
+                persisted.step_runs["parse_joke"].status,
+                StepRunStatus::Pending
+            );
+            assert!(persisted.outputs.is_empty());
+        }
+    }
 }
 
 #[tokio::test]

@@ -70,6 +70,31 @@ Examples:
 - If you must fetch data from an external source, use HTTPS and name a reliable endpoint.
 "#;
 
+const HTTP_RESPONSE_FORMAT_INSTRUCTION: &str = r#"## HTTP response formats
+
+An HTTP 200 response does not prove its body is JSON. A step output name or
+description such as "response_json" does not change the server's response format.
+- When downstream code parses JSON, prefer the available `http-get-json` tool.
+  It sends `Accept: application/json` and rejects non-JSON responses at the fetch
+  step. Keep `http-get` for HTML, plain text, or other unstructured responses.
+- For another HTTP tool, check its configured Accept header in the catalog.
+  `Content-Type` describes a request body; it does not request a JSON response.
+  TOOL_CALL arguments are URL/query/body data, not HTTP header overrides.
+  Never invent a `headers` argument unless that tool explicitly supports it.
+- Use documented API endpoints and content negotiation. Do not invent `/api`,
+  `.json`, or `?format=json` as substitutes for a required Accept header.
+  For example, icanhazdadjoke.com serves HTML by default; fetch its root URL
+  `https://icanhazdadjoke.com/` with `http-get-json` to request JSON.
+- If runtime evidence shows HTML where JSON was expected, repair the upstream
+  fetch tool/URL, not just the parser. Do not swallow JSON errors or substitute
+  an empty object, a default joke, or another success-shaped fallback.
+- Pass fetched JSON to CODE_CALL via stdin. Objects and arrays are serialized
+  as JSON text; strings are passed as text. Parse once, validate required fields,
+  and emit the step's declared outputs (for example, a JSON object keyed by the
+  output names). Do not silently succeed when required response fields are absent.
+
+"#;
+
 /// MCP catalog configuration guidance shared by compile and repair prompts.
 /// MCP configs deliberately use a flat wire shape so imported and generated
 /// definitions deserialize the same way as entries written by the UI.
@@ -679,7 +704,7 @@ checks one form lets the others through.
         "\n## Unavailable step types\nAGENT_CALL is not available for this compile request. Do not emit it or suggest replacing another step with it.\n".to_owned()
     };
     format!(
-        "{head}{step_types}{agent_capability}{UI_VOCABULARY_INSTRUCTION}{NETWORK_AND_COMMODITY_DATA_INSTRUCTION}{MCP_CONFIGURATION_INSTRUCTION}{STEP_CONFIG_SHAPES}{MODEL_AND_COMMAND_STEP_DECISION_RULE}{tail}"
+        "{head}{step_types}{agent_capability}{UI_VOCABULARY_INSTRUCTION}{NETWORK_AND_COMMODITY_DATA_INSTRUCTION}{HTTP_RESPONSE_FORMAT_INSTRUCTION}{MCP_CONFIGURATION_INSTRUCTION}{STEP_CONFIG_SHAPES}{MODEL_AND_COMMAND_STEP_DECISION_RULE}{tail}"
     )
 }
 
@@ -788,7 +813,19 @@ pub fn build_compile_user_prompt(req: &CompileRequest) -> String {
 
 fn tool_execution_note(config: &ToolConfig) -> String {
     match config {
-        ToolConfig::Http(_) => "built-in HTTP adapter; no shell command needed".to_owned(),
+        ToolConfig::Http(c) => {
+            let accept = c
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("accept"))
+                .map(|(_, value)| value.as_str())
+                .unwrap_or("not configured (server chooses the response format)");
+            format!(
+                "built-in HTTP adapter; no shell command needed; method {}; configured Accept: {accept}; \
+                 arguments do not override request headers",
+                c.method
+            )
+        }
         ToolConfig::Mcp(c) => match &c.transport {
             McpTransport::Stdio { server_command, .. } => format!(
                 "MCP stdio adapter; requires server command '{}' to be runnable",
@@ -820,7 +857,7 @@ fn mcp_auth_execution_note(auth: &McpAuth) -> &'static str {
 
 /// Build the system prompt for the first repair call: diagnose and plan only.
 pub fn build_repair_strategy_system_prompt() -> String {
-    r#"You are the planning half of a two-stage workflow repair process.
+    let head = r#"You are the planning half of a two-stage workflow repair process.
 
 ## Task
 Diagnose the failed run and produce a concise repair strategy. Do NOT output a
@@ -900,8 +937,8 @@ Respond with ONLY this JSON object, wrapped in ```json ... ```:
 With `"failure_locus": "plan"`, `world_remediation` must be an empty array.
 With `"failure_locus": "world"`, `changes` must be an empty array and
 `world_remediation` must contain at least one action.
-"#
-    .to_owned()
+"#;
+    format!("{head}{HTTP_RESPONSE_FORMAT_INSTRUCTION}")
 }
 
 /// Build the system prompt for the second repair call: implement a strategy as a patch.
@@ -991,7 +1028,7 @@ Respond with ONLY the following JSON object, wrapped in ```json ... ```:
 
 "#;
     format!(
-        "{head}{MCP_CONFIGURATION_INSTRUCTION}{STEP_CONFIG_SHAPES}{AGENT_CALL_CONFIG_SHAPE}{MODEL_AND_COMMAND_STEP_DECISION_RULE}"
+        "{head}{HTTP_RESPONSE_FORMAT_INSTRUCTION}{MCP_CONFIGURATION_INSTRUCTION}{STEP_CONFIG_SHAPES}{AGENT_CALL_CONFIG_SHAPE}{MODEL_AND_COMMAND_STEP_DECISION_RULE}"
     )
 }
 
@@ -1484,7 +1521,7 @@ Respond with ONLY the following JSON object, wrapped in ```json ... ```:
 
 No prose, no explanation, no commentary outside the JSON object.
 "#;
-    format!("{head}{UI_VOCABULARY_INSTRUCTION}{tail}")
+    format!("{head}{UI_VOCABULARY_INSTRUCTION}{HTTP_RESPONSE_FORMAT_INSTRUCTION}{tail}")
 }
 
 /// Build the user message for an intent-assessment request.
@@ -1587,7 +1624,7 @@ Respond with ONLY the following JSON object, wrapped in ```json ... ```:
 
 No prose, no explanation, no commentary outside the JSON object.
 "#;
-    format!("{head}{UI_VOCABULARY_INSTRUCTION}{tail}")
+    format!("{head}{UI_VOCABULARY_INSTRUCTION}{HTTP_RESPONSE_FORMAT_INSTRUCTION}{tail}")
 }
 
 /// Build the user message for a solution-design request.
@@ -2329,6 +2366,48 @@ mod tests {
         assert!(repair.contains("Step config shapes"));
         assert!(compile.contains("no\n`interpreter` or `script` fields"));
         assert!(repair.contains("no\n`interpreter` or `script` fields"));
+    }
+
+    #[test]
+    fn planning_and_repair_share_http_response_format_guidance() {
+        for prompt in [
+            build_assess_system_prompt(),
+            build_design_system_prompt(),
+            build_compile_system_prompt(false),
+            build_repair_strategy_system_prompt(),
+            build_repair_system_prompt(),
+        ] {
+            assert!(prompt.contains(HTTP_RESPONSE_FORMAT_INSTRUCTION));
+            assert!(prompt.contains("http-get-json"));
+            assert!(prompt.contains("Do not invent `/api`"));
+            assert!(prompt.contains("repair the upstream"));
+        }
+    }
+
+    #[test]
+    fn http_catalog_notes_expose_accept_without_exposing_other_headers() {
+        let mut config = HttpConfig {
+            base_url: String::new(),
+            method: "GET".to_owned(),
+            path_template: "{url}".to_owned(),
+            headers: IndexMap::new(),
+            timeout_secs: None,
+        };
+        let note = tool_execution_note(&ToolConfig::Http(config.clone()));
+        assert!(note.contains("server chooses the response format"));
+        config
+            .headers
+            .insert("accept".to_owned(), "application/json".to_owned());
+        config
+            .headers
+            .insert("Authorization".to_owned(), "Bearer private-key".to_owned());
+
+        let note = tool_execution_note(&ToolConfig::Http(config));
+
+        assert!(note.contains("configured Accept: application/json"));
+        assert!(note.contains("arguments do not override request headers"));
+        assert!(!note.contains("private-key"));
+        assert!(!note.contains("Authorization"));
     }
 
     #[test]

@@ -57,7 +57,7 @@ pub struct StepContext {
     pub run_id: String,
     pub progress: Option<tokio::sync::mpsc::UnboundedSender<crate::executor::ProgressEvent>>,
     pub child_progress: Option<tokio::sync::mpsc::UnboundedSender<ChildRunEvent>>,
-    /// Credentials for PROMPT_CALL steps (env-var fallback when unset).
+    /// LLM connection and credentials for prompt and agent steps.
     pub llm_keys: crate::executor::LlmKeys,
     /// Root of the local data directory (default `.inxm/`), used to derive
     /// a per-run scratch workspace for CODE_CALL steps whose optional
