@@ -4011,8 +4011,7 @@ async fn run_plan_with_timeout(
     };
 
     let plan_for_events = plan.clone();
-    let execution = executor::execute(plan, config);
-    tokio::pin!(execution);
+    let mut execution = Box::pin(executor::execute(plan, config));
 
     // Fires when the user clicks "Abort" on this run (see `abort_run`); the
     // sender is only registered in `env.run_cancellations` once `run_id` is
@@ -4059,6 +4058,7 @@ async fn run_plan_with_timeout(
             }
         }
     };
+    drop(execution);
 
     if matches!(&outcome, RunLoopOutcome::Finished(_))
         && let Some(id) = &run_id
@@ -4088,11 +4088,8 @@ async fn run_plan_with_timeout(
             }
         },
         RunLoopOutcome::Aborted => {
-            // `execution` is simply never polled again from here on — it is
-            // abandoned in place and drops when this function returns. Only
-            // stdout/stderr capture tasks the executor may have spawned can
-            // outlive that point, and those exit on their own once the
-            // underlying child process's pipes close.
+            // The executor has been dropped before persisting cancellation,
+            // releasing its lifecycle lock and stopping further checkpoint writes.
             let Some(id) = run_id else {
                 // Aborted before a run id was ever announced — nothing was
                 // persisted, so there is nothing to mark cancelled.
@@ -4167,13 +4164,15 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
 /// Delete a finished run's record. Token-usage ledger entries stay: they are
 /// spend history, not run state.
 async fn delete_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<()> {
-    if env.run_cancellations.lock().await.contains_key(run_id) {
+    let cancellations = env.run_cancellations.lock().await;
+    if cancellations.contains_key(run_id) {
         anyhow::bail!("Run {run_id} is still running. Abort it before deleting.");
     }
     env.paths
         .mutations
         .run_named("run.delete", env.triggered_by(), || {
             let storage = env.storage()?;
+            let _lifecycle = storage.runs().lock_lifecycle(run_id)?;
             if matches!(
                 storage.runs().load(run_id)?.status,
                 executor::RunStatus::Running
@@ -4183,11 +4182,13 @@ async fn delete_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<()> {
             storage.runs().delete(run_id)?;
             Ok(())
         })?;
+    drop(cancellations);
     env.emit(EngineEvent::RunList(list_runs(env)?));
     Ok(())
 }
 
 fn mark_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
+    let _lifecycle = storage.runs().lock_lifecycle(run_id)?;
     mark_run_cancelled_inner(storage, run_id, false)
 }
 
@@ -4247,7 +4248,7 @@ async fn resume_run(
     let storage = Arc::new(env.storage()?);
     let catalog = env.catalog()?;
 
-    let run = load_run_by_prefix(&storage, run_id)?;
+    let (run, _lifecycle) = load_run_for_execution(&storage, run_id)?;
     if !run.status.is_failed() {
         anyhow::bail!(
             "run '{}' has not failed (status: {}); nothing to resume",
@@ -4301,25 +4302,6 @@ async fn resume_run(
         cancellations.insert(run_id.clone(), RunCancellation::Active(cancel_tx));
     }
     tokio::pin!(cancel_rx);
-
-    // A concurrent resume may have loaded the same failed record before this
-    // command reserved the registry slot. Re-read after reservation so a
-    // cancellation that just completed cannot be resumed from stale state.
-    let run = match storage.runs().load(&run_id) {
-        Ok(run) if run.status.is_failed() => run,
-        Ok(run) => {
-            env.run_cancellations.lock().await.remove(&run_id);
-            anyhow::bail!(
-                "run '{}' has not failed (status: {}); nothing to resume",
-                run.id,
-                run.status
-            );
-        }
-        Err(error) => {
-            env.run_cancellations.lock().await.remove(&run_id);
-            return Err(error.into());
-        }
-    };
 
     // The run id is already known (this continues an existing run rather
     // than minting one), so — unlike `run_plan` — there is no need to wait
@@ -5538,6 +5520,16 @@ pub(crate) fn load_run_by_prefix(storage: &StorageRoot, run_ref: &str) -> anyhow
     }
 }
 
+/// Resolve the canonical ID, claim its lifecycle, then reload the checkpoint.
+/// The prefix lookup is not authoritative: deletion may win before the claim.
+pub(crate) fn load_run_for_execution(
+    storage: &StorageRoot,
+    run_ref: &str,
+) -> anyhow::Result<(Run, crate::storage::runs::RunLifecycleGuard)> {
+    let resolved = load_run_by_prefix(storage, run_ref)?;
+    Ok(storage.runs().load_for_execution(&resolved.id)?)
+}
+
 /// Decide how a failed run may be resumed.
 ///
 /// A plan version newer than the run's means a repair patch was applied —
@@ -5633,6 +5625,143 @@ mod tests {
             steps: vec![],
             outputs: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn run_deletion_rejects_an_execution_claim_from_another_storage_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "failed".to_owned(),
+        };
+        storage.runs().save(&run).unwrap();
+        let independent = StorageRoot::open(&env.paths.data_dir).unwrap();
+        let (_, executing) = load_run_for_execution(&independent, &run.id[..8]).unwrap();
+
+        let error = delete_run(&env, &run.id).await.unwrap_err();
+
+        assert!(error.to_string().contains("in use"), "{error:#}");
+        assert_eq!(storage.runs().load(&run.id).unwrap(), run);
+        let mut other = Run::new("other-plan", 1);
+        other.status = executor::RunStatus::Succeeded;
+        storage.runs().save(&other).unwrap();
+        delete_run(&env, &other.id).await.unwrap();
+
+        drop(executing);
+        delete_run(&env, &run.id).await.unwrap();
+        assert!(load_run_for_execution(&independent, &run.id).is_err());
+        assert!(storage.runs().load(&run.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn deletion_of_an_idle_human_checkpoint_prevents_later_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::WaitingForHuman {
+            step_id: "answer".to_owned(),
+        };
+        storage.runs().save(&run).unwrap();
+
+        delete_run(&env, &run.id).await.unwrap();
+
+        assert!(load_run_for_execution(&storage, &run.id).is_err());
+        assert!(
+            resume_run(&env, "", &run.id, Default::default())
+                .await
+                .is_err()
+        );
+        assert!(storage.runs().load(&run.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn resumed_execution_blocks_deletion_until_cancellation_is_persisted() {
+        execution_blocks_deletion_until_cancellation_is_persisted(true).await;
+    }
+
+    #[tokio::test]
+    async fn new_execution_blocks_deletion_until_cancellation_is_persisted() {
+        execution_blocks_deletion_until_cancellation_is_persisted(false).await;
+    }
+
+    async fn execution_blocks_deletion_until_cancellation_is_persisted(resuming: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        env.evt_tx = events_tx;
+        let env = Arc::new(env);
+        let storage = env.storage().unwrap();
+        let mut plan = empty_plan_v1();
+        plan.steps.push(crate::plan::types::PlanStep {
+            id: "answer".to_owned(),
+            name: "Answer".to_owned(),
+            description: None,
+            config: crate::plan::types::StepConfig::HumanInteraction(
+                crate::plan::types::HumanInteractionConfig {
+                    prompt: "Continue?".to_owned(),
+                    response_field: "answer".to_owned(),
+                    approval_required: false,
+                },
+            ),
+            depends_on: vec![],
+            outputs: vec![],
+            timeout_secs: None,
+            retry: None,
+        });
+        storage.plans().save(&plan).unwrap();
+        plan.metadata.version = 2;
+        storage.plans().save(&plan).unwrap();
+        let mut run = Run::new(plan.metadata.id.clone(), 1);
+        run.status = executor::RunStatus::Failed {
+            failed_step_id: "answer".to_owned(),
+            message: "failed".to_owned(),
+        };
+        let mut step = crate::storage::runs::StepRun::new("answer");
+        step.status = crate::storage::runs::StepRunStatus::Failed;
+        run.step_runs.insert("answer".to_owned(), step);
+        if resuming {
+            storage.runs().save(&run).unwrap();
+        }
+        let execution_env = env.clone();
+        let execution = tokio::spawn(async move {
+            if resuming {
+                resume_run(&execution_env, "", &run.id, Default::default()).await
+            } else {
+                run_plan(&execution_env, &plan.metadata.id, Default::default()).await
+            }
+        });
+        let (run_id, request) = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = events_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("run should request human input");
+                if let EngineEvent::HumanNeeded { run_id, request } = event.event {
+                    break (run_id, request);
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(delete_run(&env, &run_id).await.is_err());
+        assert!(storage.runs().lock_lifecycle(&run_id).is_err());
+        assert!(matches!(
+            abort_run(&env, &run_id).await.unwrap(),
+            AbortOutcome::Signalled
+        ));
+        execution.await.unwrap().unwrap();
+        drop(request);
+
+        assert_eq!(
+            storage.runs().load(&run_id).unwrap().status,
+            executor::RunStatus::Cancelled
+        );
+        delete_run(&env, &run_id).await.unwrap();
+        assert!(storage.runs().load(&run_id).is_err());
     }
 
     #[tokio::test]
