@@ -310,21 +310,20 @@ fn dogfooding_bundles_are_refused_without_experimental_agent_calls() {
         .join("examples/dogfooding")
         .join("bugfix.plan.json");
     harness.handle.send(EngineCommand::ImportPlan { path });
-    let deadline = Instant::now() + EVENT_TIMEOUT;
-    loop {
-        let remaining = deadline
-            .checked_duration_since(Instant::now())
-            .unwrap_or_else(|| panic!("timed out waiting for import refusal"));
-        let routed = harness
-            .events
-            .recv_timeout(remaining)
-            .unwrap_or_else(|_| panic!("timed out waiting for import refusal"));
-        if let EngineEvent::Failure(message) = routed.event {
-            assert!(message.contains("Experimental agent steps"));
-            assert!(message.contains("AGENT_CALL"));
-            break;
-        }
-    }
+    let message = wait_for(&harness.events, "import refusal", |event| match event {
+        EngineEvent::PlanImportFailed(message) => Some(message),
+        _ => None,
+    });
+    assert!(message.contains("Experimental agent steps"));
+    assert!(message.contains("AGENT_CALL"));
+    assert!(
+        StorageRoot::open(&harness.paths.data_dir)
+            .unwrap()
+            .plans()
+            .list()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -369,6 +368,7 @@ async fn dossier_guided_flow_carries_inputs_and_compiles_with_approval_only_hitl
     handle.send(EngineCommand::AssessIntent {
         intent: DOSSIER_INTENT.to_owned(),
         conversation: conversation.clone(),
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let assessment = wait_for(&events, "AssessmentReady", |event| match event {
         EngineEvent::AssessmentReady { assessment } => Some(*assessment),
@@ -382,6 +382,7 @@ async fn dossier_guided_flow_carries_inputs_and_compiles_with_approval_only_hitl
         conversation: conversation.clone(),
         previous_design: None,
         feedback: None,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let design = wait_for(&events, "DesignReady", |event| match event {
         EngineEvent::DesignReady { design } => Some(*design),
@@ -401,9 +402,10 @@ async fn dossier_guided_flow_carries_inputs_and_compiles_with_approval_only_hitl
         spec: assessment.spec,
         design: Some(Box::new(design)),
         conversation,
+        creation_session_id: "test-creation-session".to_owned(),
     });
     let plan = wait_for(&events, "PlanCompiled", |event| match event {
-        EngineEvent::PlanCompiled { plan } => Some(*plan),
+        EngineEvent::PlanCompiled { plan, .. } => Some(*plan),
         _ => None,
     });
 

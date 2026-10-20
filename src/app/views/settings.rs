@@ -174,7 +174,6 @@ pub fn show(
                 });
             });
 
-            ui.add_space(12.0);
             theme::card_frame().show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 widgets::section_label(ui, "Compiler");
@@ -198,6 +197,92 @@ pub fn show(
                     engine.send(EngineCommand::SaveSettings {
                         settings: Box::new(state.draft.clone()),
                     });
+                }
+
+                if matches!(
+                    state.draft.backend,
+                    BackendChoice::Claude | BackendChoice::Auto
+                ) {
+                    ui.add_space(10.0);
+                    ui.separator();
+                    ui.add_space(8.0);
+                    widgets::section_label(ui, "Token usage");
+                    ui.add_space(2.0);
+                    if ui
+                        .checkbox(
+                            &mut state.draft.claude_usage_enabled,
+                            "Record and show Claude token usage",
+                        )
+                        .changed()
+                    {
+                        engine.send(EngineCommand::SaveSettings {
+                            settings: Box::new(state.draft.clone()),
+                        });
+                    }
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(
+                            "Records provider-reported token totals for direct Anthropic API calls and shows them in plan and run summaries. Turning this off does not delete existing local usage history.",
+                        )
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_faint()),
+                    );
+                    ui.add_space(6.0);
+                    let prompt_capture_enabled = crate::llm::claude_usage_enabled(
+                        state.draft.claude_usage_enabled,
+                    );
+                    if ui
+                        .add_enabled_ui(prompt_capture_enabled, |ui| {
+                            ui.checkbox(
+                                &mut state.draft.claude_prompts_enabled,
+                                "Store Claude API messages",
+                            )
+                        })
+                        .inner
+                        .changed()
+                    {
+                        engine.send(EngineCommand::SaveSettings {
+                            settings: Box::new(state.draft.clone()),
+                        });
+                    }
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(
+                            "Saves exact request and response bodies with each direct Claude API record. Messages can contain plan inputs and model output.",
+                        )
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_faint()),
+                    );
+                    if !prompt_capture_enabled {
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new("Enable Claude API usage recording to store messages.")
+                                .size(theme::FONT_SMALL)
+                                .color(theme::text_faint()),
+                        );
+                    }
+                    if crate::llm::store_claude_prompts() {
+                        ui.add_space(4.0);
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(
+                                "Currently enabled by INXM_STORE_CLAUDE_PROMPTS for this process.",
+                            )
+                            .size(theme::FONT_SMALL)
+                            .color(theme::warn()),
+                        );
+                    }
+                    if crate::llm::claude_usage_runtime_disabled() {
+                        ui.add_space(4.0);
+                        widgets::wrapped_label(
+                            ui,
+                            RichText::new(
+                                "Currently forced off by INXM_CLAUDE_USAGE=off — no usage is recorded regardless of this checkbox.",
+                            )
+                            .size(theme::FONT_SMALL)
+                            .color(theme::warn()),
+                        );
+                    }
                 }
 
                 ui.add_space(10.0);
@@ -736,7 +821,7 @@ pub fn show(
                 widgets::section_label(ui, "About");
                 ui.add_space(2.0);
                 ui.label(
-                    RichText::new(format!("inxm-local v{}", env!("CARGO_PKG_VERSION")))
+                    RichText::new(format!("inxm-local {}", crate::version::DISPLAY))
                         .color(theme::text_muted()),
                 );
                 ui.hyperlink_to("Releases on GitHub", RELEASES_URL);
@@ -774,8 +859,6 @@ pub fn show(
                                 ui,
                                 if checking {
                                     "Checking…"
-                                } else if cooling_down {
-                                    "Up to date"
                                 } else {
                                     "Check for updates"
                                 },
@@ -936,7 +1019,7 @@ pub fn update_dialog(
         .show(ctx, |ui| {
             ui.set_width(DIALOG_WIDTH.min((ctx.screen_rect().width() - SCREEN_MARGIN).max(0.0)));
             ui.label(theme::title("Update INXM", theme::FONT_HEADING));
-            ui.label(format!("Installed version: {}", env!("CARGO_PKG_VERSION")));
+            ui.label(format!("Installed version: {}", crate::version::DISPLAY));
             if let Some((version, url)) = available {
                 ui.label(format!("Available version: {version}"));
                 ui.hyperlink_to("Release notes", url);
@@ -1035,4 +1118,42 @@ fn update_controls(
         _ => {}
     }
     command
+}
+
+#[cfg(test)]
+mod update_dialog_tests {
+    use super::*;
+
+    #[test]
+    fn installed_version_label_uses_the_build_identity() {
+        fn contains_text(shape: &egui::Shape, expected: &str) -> bool {
+            match shape {
+                egui::Shape::Text(text) => text.galley.job.text == expected,
+                egui::Shape::Vec(shapes) => {
+                    shapes.iter().any(|shape| contains_text(shape, expected))
+                }
+                _ => false,
+            }
+        }
+
+        let _guard = theme::test_mode_lock();
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, true);
+        let mut open = true;
+        let update = crate::app::update_controller::UpdateController::default();
+        let expected = format!("Installed version: {}", crate::version::DISPLAY);
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            update_dialog(ctx, &mut open, None, &update);
+        });
+        let output = ctx.run(egui::RawInput::default(), |ctx| {
+            update_dialog(ctx, &mut open, None, &update);
+        });
+
+        assert!(
+            output
+                .shapes
+                .iter()
+                .any(|shape| contains_text(&shape.shape, &expected))
+        );
+    }
 }

@@ -809,14 +809,26 @@ async fn compile_plan_work(
     let settings = AppSettings::load(&state.paths.settings_path);
     let backend = engine::create_configured_backend(&settings)?;
     let request = engine::compile_request(&catalog, &settings, args.intent, None);
-    let plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        engine::compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "MCP compilation failed",
-            Some(&console),
+    let claude_usage = super::usage::LedgerRecorder::creation(
+        storage(state).ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &super::usage::new_creation_session_id(),
+        crate::storage::llm_usage::CreationPhase::Compile,
+        crate::storage::llm_usage::UsageOrigin::Mcp,
+        Some(console.clone()),
+    );
+    let plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            engine::compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "MCP compilation failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -839,6 +851,7 @@ async fn compile_plan_work(
             )
         },
     )?;
+    claude_usage.link_plan(&plan.metadata.id, plan.metadata.version);
     count_usage(state, crate::telemetry::usage::Action::PlanCreated);
     Ok(json!({ "plan": plan }))
 }
@@ -1175,16 +1188,28 @@ async fn edit_plan_work(
     let catalog = catalog(state)?;
     let settings = AppSettings::load(&state.paths.settings_path);
     let backend = engine::create_configured_backend(&settings)?;
+    let claude_usage = super::usage::LedgerRecorder::edit(
+        Some(storage.clone()),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &existing.metadata.id,
+        existing.metadata.version,
+        crate::storage::llm_usage::UsageOrigin::Mcp,
+        Some(console.clone()),
+    );
     let request =
         engine::edit_compile_request(&storage, &catalog, &settings, args.instruction, existing)?;
-    let plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        engine::compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "MCP plan edit failed",
-            Some(&console),
+    let plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            engine::compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "MCP plan edit failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -1215,9 +1240,11 @@ async fn edit_plan_work(
 async fn execute_plan(state: &McpState, args: ExecuteArgs) -> anyhow::Result<Value> {
     let storage = Arc::new(storage(state)?);
     let requested_plan = engine::resolve_plan(&storage, &args.plan_ref)?;
+    let mut lifecycle = None;
     let (plan, checkpoint, inputs) = match args.run_id.as_deref() {
         Some(run_id) => {
-            let run = engine::load_run_by_prefix(&storage, run_id)?;
+            let (run, guard) = engine::load_run_for_execution(&storage, run_id)?;
+            lifecycle = Some(guard);
             if run.plan_id != requested_plan.metadata.id {
                 anyhow::bail!(
                     "run '{}' belongs to plan '{}', not '{}'",
@@ -1253,6 +1280,8 @@ async fn execute_plan(state: &McpState, args: ExecuteArgs) -> anyhow::Result<Val
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: engine::llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         source: Some(crate::storage::runs::RunSource::Mcp),
     };
 
@@ -1290,6 +1319,7 @@ async fn execute_plan(state: &McpState, args: ExecuteArgs) -> anyhow::Result<Val
             }
         }
     };
+    drop(lifecycle);
 
     if let Some(error) = response_error {
         return Err(error);
@@ -1512,7 +1542,7 @@ fn reject_patch(state: &McpState, args: RejectPatchArgs) -> anyhow::Result<Value
 /// while resuming surfaces the same `elicitation_required` shape.
 async fn resume_run(state: &McpState, args: ResumeRunArgs) -> anyhow::Result<Value> {
     let storage = Arc::new(storage(state)?);
-    let run = engine::load_run_by_prefix(&storage, &args.run_id)?;
+    let (run, _lifecycle) = engine::load_run_for_execution(&storage, &args.run_id)?;
     if !run.status.is_failed() {
         anyhow::bail!("run '{}' has not failed (status: {})", run.id, run.status);
     }
@@ -1535,6 +1565,8 @@ async fn resume_run(state: &McpState, args: ResumeRunArgs) -> anyhow::Result<Val
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: engine::llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         // Resume keeps the run's existing source.
         source: None,
     };
@@ -1944,6 +1976,119 @@ mod tests {
             compiles: Arc::default(),
         });
         (tmp, state)
+    }
+
+    #[tokio::test]
+    async fn mcp_resume_paths_respect_execution_and_deletion_claims() {
+        let (_tmp, state) = test_state();
+        let storage = storage(&state).unwrap();
+        let plan = echo_plan();
+        storage.plans().save(&plan).unwrap();
+        let mut run = crate::storage::runs::Run::new(plan.metadata.id.clone(), 1);
+        run.status = executor::RunStatus::WaitingForHuman {
+            step_id: "echo".to_owned(),
+        };
+        storage.runs().save(&run).unwrap();
+        let (_, guard) = engine::load_run_for_execution(&storage, &run.id).unwrap();
+
+        let execute_error = execute_plan(
+            &state,
+            ExecuteArgs {
+                plan_ref: plan.metadata.id.clone(),
+                run_id: Some(run.id.clone()),
+                inputs: None,
+                human_responses: Default::default(),
+            },
+        )
+        .await
+        .unwrap_err();
+        let repair_error = resume_run(
+            &state,
+            ResumeRunArgs {
+                run_id: run.id.clone(),
+                inputs: Default::default(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(execute_error.to_string().contains("in use"));
+        assert!(repair_error.to_string().contains("in use"));
+        assert_eq!(storage.runs().load(&run.id).unwrap(), run);
+        storage.runs().delete(&run.id).unwrap();
+        drop(guard);
+
+        assert!(
+            execute_plan(
+                &state,
+                ExecuteArgs {
+                    plan_ref: plan.metadata.id.clone(),
+                    run_id: Some(run.id.clone()),
+                    inputs: None,
+                    human_responses: Default::default(),
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            resume_run(
+                &state,
+                ResumeRunArgs {
+                    run_id: run.id.clone(),
+                    inputs: Default::default(),
+                },
+            )
+            .await
+            .is_err()
+        );
+        assert!(storage.runs().load(&run.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_human_checkpoint_releases_the_lifecycle_between_requests() {
+        let (_tmp, state) = test_state();
+        let storage = storage(&state).unwrap();
+        let mut plan = echo_plan();
+        plan.steps[0].config = crate::plan::types::StepConfig::HumanInteraction(
+            crate::plan::types::HumanInteractionConfig {
+                prompt: "Continue?".to_owned(),
+                response_field: "answer".to_owned(),
+                approval_required: false,
+            },
+        );
+        storage.plans().save(&plan).unwrap();
+
+        let paused = execute_plan(
+            &state,
+            ExecuteArgs {
+                plan_ref: plan.metadata.id.clone(),
+                run_id: None,
+                inputs: None,
+                human_responses: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(paused["status"], "elicitation_required");
+        let run_id = paused["run_id"].as_str().unwrap().to_owned();
+        let guard = storage.runs().lock_lifecycle(&run_id).unwrap();
+        drop(guard);
+
+        let completed = execute_plan(
+            &state,
+            ExecuteArgs {
+                plan_ref: plan.metadata.id,
+                run_id: Some(run_id.clone()),
+                inputs: None,
+                human_responses: HashMap::from([("echo".to_owned(), json!("done"))]),
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(completed["run"]["status"], "succeeded");
+        assert!(storage.runs().lock_lifecycle(&run_id).is_ok());
     }
 
     /// Drive `handle_mcp` with a raw body and decode the JSON-RPC response.

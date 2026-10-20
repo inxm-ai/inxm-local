@@ -1,9 +1,11 @@
 //! Run state persistence.
 
 use crate::error::StorageError;
+use crate::storage::llm_usage::{ClaudeCallSummary, TokenTotals};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 
 // ─── Run state types ──────────────────────────────────────────────────────────
@@ -146,6 +148,10 @@ pub struct StepRun {
     /// Executions of this template when it is owned by a FAN_OUT step.
     #[serde(default)]
     pub iterations: Vec<StepRunIteration>,
+    /// Every recorded Claude API call of this step, across all attempts,
+    /// including failed ones. FAN_OUT calls carry their iteration index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub claude_calls: Vec<ClaudeCallSummary>,
 }
 
 impl StepRun {
@@ -163,7 +169,13 @@ impl StepRun {
             duration_ms: None,
             token_usage: None,
             iterations: Vec::new(),
+            claude_calls: Vec::new(),
         }
+    }
+
+    /// Provider-reported Claude usage of this step's recorded calls.
+    pub fn claude_totals(&self) -> TokenTotals {
+        TokenTotals::from_summaries(&self.claude_calls)
     }
 }
 
@@ -185,6 +197,9 @@ pub struct Run {
     /// Step runs keyed by step ID, in insertion order.
     #[serde(default)]
     pub step_runs: IndexMap<String, StepRun>,
+    /// Recorded calls from steps removed by a repair, keyed by their original ID.
+    #[serde(default, skip_serializing_if = "IndexMap::is_empty")]
+    pub archived_claude_calls: IndexMap<String, Vec<ClaudeCallSummary>>,
     /// The plan's published outputs, resolved from `plan.outputs` against the
     /// completed run's step outputs. Populated once the run succeeds; shown
     /// to the user as the run's "final result".
@@ -204,6 +219,7 @@ impl Run {
             source: None,
             inputs: IndexMap::new(),
             step_runs: IndexMap::new(),
+            archived_claude_calls: IndexMap::new(),
             outputs: IndexMap::new(),
         }
     }
@@ -212,6 +228,16 @@ impl Run {
         self.step_runs
             .values()
             .find(|sr| sr.status == StepRunStatus::Failed)
+    }
+
+    /// Provider-reported Claude usage across every step's recorded calls.
+    pub fn claude_totals(&self) -> TokenTotals {
+        TokenTotals::from_summaries(
+            self.step_runs
+                .values()
+                .flat_map(|step_run| &step_run.claude_calls)
+                .chain(self.archived_claude_calls.values().flatten()),
+        )
     }
 
     /// Aggregate token usage across every step that reported it, plus how many
@@ -271,9 +297,54 @@ pub struct RunStore {
     dir: PathBuf,
 }
 
+/// Exclusive ownership of a run's execution/deletion lifecycle.
+/// Explicitly unlock on drop so a duplicated/inherited handle cannot retain ownership.
+pub struct RunLifecycleGuard {
+    _file: File,
+}
+
+impl Drop for RunLifecycleGuard {
+    fn drop(&mut self) {
+        if let Err(error) = fs2::FileExt::unlock(&self._file) {
+            tracing::warn!(%error, "could not release run lifecycle lock");
+        }
+    }
+}
+
 impl RunStore {
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
+    }
+
+    /// Claim a run without waiting for another executor or deletion to finish.
+    /// Lock files must not be removed: every contender must lock the same inode.
+    pub fn lock_lifecycle(&self, run_id: &str) -> Result<RunLifecycleGuard, StorageError> {
+        super::validate_record_id(run_id)?;
+        let locks = self.dir.join(".locks");
+        std::fs::create_dir_all(&locks)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(locks.join(format!("{run_id}.lock")))?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("run '{run_id}' is in use or could not be locked: {error}"),
+            )
+        })?;
+        Ok(RunLifecycleGuard { _file: file })
+    }
+
+    /// Reload the authoritative checkpoint while excluding deletion and resume.
+    pub fn load_for_execution(
+        &self,
+        run_id: &str,
+    ) -> Result<(Run, RunLifecycleGuard), StorageError> {
+        let lifecycle = self.lock_lifecycle(run_id)?;
+        let run = self.load(run_id)?;
+        Ok((run, lifecycle))
     }
 
     /// Persist (or update) a run.
@@ -316,6 +387,20 @@ impl RunStore {
             .into());
         }
         Ok(run)
+    }
+
+    /// Delete a stored run record.
+    pub fn delete(&self, run_id: &str) -> Result<(), StorageError> {
+        super::validate_record_id(run_id)?;
+        let path = self.dir.join(run_file_name(run_id));
+        if !path.exists() {
+            return Err(StorageError::NotFound {
+                kind: NOT_FOUND_KIND,
+                id: run_id.to_owned(),
+            });
+        }
+        std::fs::remove_file(path)?;
+        Ok(())
     }
 
     /// List all runs, most recent first.
@@ -550,6 +635,84 @@ mod tests {
     }
 
     #[test]
+    fn delete_removes_the_record_and_reports_unknown_runs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let run = Run::new("plan-1", 1);
+        store.save(&run).unwrap();
+
+        store.delete(&run.id).unwrap();
+
+        assert!(matches!(
+            store.load(&run.id),
+            Err(StorageError::NotFound { kind: "run", .. })
+        ));
+        assert!(matches!(
+            store.delete(&run.id),
+            Err(StorageError::NotFound { kind: "run", .. })
+        ));
+    }
+
+    #[test]
+    fn lifecycle_lock_is_shared_across_stores_and_released_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = store_in(&tmp);
+        let second = store_in(&tmp);
+        let guard = first.lock_lifecycle("same-run").unwrap();
+
+        assert!(second.lock_lifecycle("same-run").is_err());
+        let other = second.lock_lifecycle("other-run").unwrap();
+        drop(guard);
+        let reacquired = second.lock_lifecycle("same-run").unwrap();
+        assert!(first.lock_lifecycle("same-run").is_err());
+        drop(reacquired);
+        drop(other);
+        assert!(first.lock_lifecycle("same-run").is_ok());
+    }
+
+    #[test]
+    fn lifecycle_drop_releases_lock_even_while_a_duplicate_handle_remains_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let guard = store.lock_lifecycle("same-run").unwrap();
+        let duplicate = guard._file.try_clone().unwrap();
+        assert!(store.lock_lifecycle("same-run").is_err());
+
+        drop(guard);
+
+        let reacquired = store.lock_lifecycle("same-run").unwrap();
+        assert!(duplicate.metadata().is_ok());
+        assert!(store.lock_lifecycle("same-run").is_err());
+        drop(duplicate);
+        assert!(store.lock_lifecycle("same-run").is_err());
+        drop(reacquired);
+        assert!(store.lock_lifecycle("same-run").is_ok());
+    }
+
+    #[test]
+    fn execution_claim_reloads_instead_of_reusing_a_deleted_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let run = Run::new("plan", 1);
+        store.save(&run).unwrap();
+        let stale = store.load(&run.id).unwrap();
+        {
+            let _deleting = store.lock_lifecycle(&run.id).unwrap();
+            store.delete(&run.id).unwrap();
+        }
+
+        assert!(matches!(
+            store.load_for_execution(&stale.id),
+            Err(StorageError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.load(&run.id),
+            Err(StorageError::NotFound { .. })
+        ));
+        assert!(store.lock_lifecycle(&run.id).is_ok());
+    }
+
+    #[test]
     fn load_of_unknown_run_reports_not_found() {
         let tmp = tempfile::tempdir().unwrap();
         let err = store_in(&tmp).load("no-such-run").unwrap_err();
@@ -671,5 +834,84 @@ mod tests {
         .unwrap();
 
         assert!(store.load(&requested_id).is_err());
+    }
+
+    fn claude_call(
+        attempt: u32,
+        outcome: crate::llm::ClaudeCallOutcome,
+        tokens: Option<(u64, u64)>,
+    ) -> ClaudeCallSummary {
+        ClaudeCallSummary {
+            call_id: format!("call-{attempt}"),
+            attempt,
+            iteration: None,
+            outcome,
+            usage: tokens.map(|(input, output)| crate::llm::ClaudeUsage {
+                input_tokens: Some(input),
+                output_tokens: Some(output),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_5m_input_tokens: None,
+                cache_creation_1h_input_tokens: None,
+                thinking_tokens: None,
+                web_search_requests: None,
+                web_fetch_requests: None,
+                service_tier: None,
+                inference_geo: None,
+                raw: serde_json::json!({}),
+            }),
+        }
+    }
+
+    #[test]
+    fn failed_attempt_claude_calls_persist_with_the_run() {
+        use crate::llm::ClaudeCallOutcome;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let mut run = Run::new("plan-1", 1);
+        let mut step = StepRun::new("summarize");
+        step.claude_calls = vec![
+            claude_call(1, ClaudeCallOutcome::NoTextBlock, Some((100, 1024))),
+            claude_call(2, ClaudeCallOutcome::Ok, Some((100, 50))),
+        ];
+        run.step_runs.insert("summarize".to_owned(), step);
+        store.save(&run).unwrap();
+
+        let loaded = store.load(&run.id).unwrap();
+        assert_eq!(loaded, run);
+        let totals = loaded.claude_totals();
+        assert_eq!(totals.calls, 2);
+        assert_eq!(totals.total, 100 + 1024 + 100 + 50);
+        assert_eq!(loaded.step_runs["summarize"].claude_totals(), totals);
+    }
+
+    #[test]
+    fn run_json_without_claude_calls_still_loads() {
+        let run = Run::new("plan-1", 1);
+        let mut json = serde_json::to_value(&run).unwrap();
+        json["step_runs"] = serde_json::json!({
+            "summarize": {
+                "step_id": "summarize",
+                "status": "succeeded",
+                "started_at": null,
+                "finished_at": null,
+                "attempt": 1,
+                "stdout": null,
+                "stderr": null,
+                "error": null,
+                "duration_ms": 10,
+                "token_usage": {"input_tokens": 3, "output_tokens": 4}
+            }
+        });
+        let loaded: Run = serde_json::from_value(json).unwrap();
+        let step = &loaded.step_runs["summarize"];
+        assert!(step.claude_calls.is_empty());
+        assert!(loaded.claude_totals().is_empty());
+        assert!(
+            !serde_json::to_string(step)
+                .unwrap()
+                .contains("claude_calls"),
+            "empty call lists keep the old file shape"
+        );
     }
 }

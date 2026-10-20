@@ -1,4 +1,4 @@
-# MCP server examples
+# Adding MCP servers
 
 Use these examples to configure MCP servers in **MCP Tools**
 
@@ -22,7 +22,7 @@ In this example, INXM Local runs `mcp-remote` locally to connect to GitHub's hos
 
 1. Make sure Node.js is installed and `npx` is available.
 2. Create a GitHub PAT with the permissions needed for the tools you plan to use. Replace `ghp_yourTokenHere` in **Server env** with your token. This value is saved in the local tool catalog; protect that file and do not commit it to a repository.
-3. In **MCP Tools**, click **+ Add** and enter the fields above. Click **List tools on server**, then select and import the tools you need. When in doubt, refer to [the guide on local stdio](tools.md#local-stdio).
+3. In **MCP Tools**, click **+ Add** and enter the fields above. Click **List tools on server**, then select and import the tools you need. When in doubt, refer to [the guide on local stdio](../user-guide/tools.md#local-stdio).
 
 ## Granola
 
@@ -39,7 +39,7 @@ Granola supports browser-based OAuth without a pre-registered client ID.
 
 1. In **MCP Tools**, click **+ Add** and enter the fields above.
 2. Click **Connect**, then click on **Open authorization page** when the link appears. Sign in to Granola and authorize access in your browser.
-3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. For more details, refer to [the guide on Remote HTTP](tools.md#remote-http).
+3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. For more details, refer to [the guide on Remote HTTP](../user-guide/tools.md#remote-http).
 
 ## Notion
 
@@ -56,7 +56,7 @@ Notion's hosted MCP server connects to your workspace through browser-based OAut
 
 1. In **MCP Tools**, click **+ Add** and enter the fields above.
 2. Click **Connect**, then **Open authorization page** when the link appears. Sign in to Notion and authorize access to the workspace you want to use.
-3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](tools.md#remote-http) for more details.
+3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](../user-guide/tools.md#remote-http) for more details.
 
 ## Linear
 
@@ -73,7 +73,7 @@ Linear's hosted MCP server connects to your workspace through browser-based OAut
 
 1. In **MCP Tools**, click **+ Add** and enter the fields above.
 2. Click **Connect**, then **Open authorization page** when the link appears. Sign in to Linear and authorize access to your workspace.
-3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](tools.md#remote-http) for more details.
+3. Once the connection shows **Connected**, INXM Local lists the tools automatically. Select the ones you need and click **Import N selected**. See [Remote HTTP](../user-guide/tools.md#remote-http) for more details.
 
 ## Slack
 
@@ -100,7 +100,7 @@ This example runs the Slack MCP server locally with a user OAuth token from a Sl
     - `search:read`
     - `usergroups:read`, `usergroups:write`
 4. Scroll up to **Install to Workspace** (or **Install App**) and approve the permissions. Copy the **User OAuth Token** (starting with `xoxp-`) from the same **OAuth & Permissions** page.
-5. In INXM Local **MCP Tools**, click **+ Add** and enter the fields above, replacing `xoxp-your-token-here` in **Server env** with your token. Click **List tools on server**, then select and import the tools you need. See [Local stdio](tools.md#local-stdio) for more details. The token is saved in the local tool catalog; protect that file and do not commit it to a repository.
+5. In INXM Local **MCP Tools**, click **+ Add** and enter the fields above, replacing `xoxp-your-token-here` in **Server env** with your token. Click **List tools on server**, then select and import the tools you need. See [Local stdio](../user-guide/tools.md#local-stdio) for more details. The token is saved in the local tool catalog; protect that file and do not commit it to a repository.
 
 ## Microsoft 365
 
@@ -127,4 +127,4 @@ In this case, a single server configuration covers multiple M365 services, so yo
 | Server args | `-y @softeria/ms-365-mcp-server` |
 
 1. Make sure Node.js is installed and `npx` is available.
-2. In **MCP Tools**, click **+ Add** and enter the fields above. Click **List tools on server**, then select and import the tools you need. See [Local stdio](tools.md#local-stdio) for more details.
+2. In **MCP Tools**, click **+ Add** and enter the fields above. Click **List tools on server**, then select and import the tools you need. See [Local stdio](../user-guide/tools.md#local-stdio) for more details.

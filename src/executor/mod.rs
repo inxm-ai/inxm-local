@@ -12,6 +12,7 @@
 
 pub mod dag;
 pub mod step_runners;
+mod usage;
 
 pub use crate::storage::runs::{Run, RunStatus, StepRun, StepRunIteration, StepRunStatus};
 
@@ -126,6 +127,10 @@ pub struct ExecutorConfig {
     pub human: Option<tokio::sync::mpsc::UnboundedSender<HumanRequest>>,
     /// Credentials for PROMPT_CALL steps (env-var fallback when unset).
     pub llm_keys: LlmKeys,
+    /// Whether Claude API usage is recorded for this execution.
+    pub claude_usage_enabled: bool,
+    /// Whether Claude API request bodies are retained for this execution.
+    pub claude_prompts_enabled: bool,
     /// Which surface asked for this execution; stamped on the run record so
     /// the Runs view can show where a run came from. Resume paths
     /// keep the run's existing value.
@@ -144,6 +149,11 @@ pub async fn execute(mut plan: Plan, config: ExecutorConfig) -> Result<Run, Exec
 
     // ── 1. Create run, initialise step entries, save immediately ─────────────
     let mut run = Run::new(plan.metadata.id.clone(), plan.metadata.version);
+    let _lifecycle = config
+        .storage
+        .runs()
+        .lock_lifecycle(&run.id)
+        .map_err(|error| ExecutorError::Storage(error.to_string()))?;
     run.inputs = inputs;
     run.source = config.source;
     for step in &plan.steps {
@@ -310,16 +320,29 @@ pub async fn resume_from_repair(
     run.inputs = inputs;
     inject_runtime_inputs(&mut plan, &run.inputs);
 
-    // A step whose ID no longer exists in the new plan (renamed/replaced by
-    // the patch) carries no useful state forward for that plan; drop it
-    // rather than leak a stale entry. `execute_run` treats a missing entry
-    // exactly like a fresh `Pending` one, so this is harmless.
+    // Removed steps lose their execution checkpoints, but their billed calls
+    // still belong to this run.
+    for (step_id, step_run) in &mut run.step_runs {
+        if plan.step(step_id).is_none() && !step_run.claude_calls.is_empty() {
+            run.archived_claude_calls
+                .entry(step_id.clone())
+                .or_default()
+                .append(&mut step_run.claude_calls);
+        }
+    }
     run.step_runs
         .retain(|step_id, _| plan.step(step_id).is_some());
 
     for step_id in reset_step_ids {
-        run.step_runs
-            .insert(step_id.clone(), StepRun::new(&step_id));
+        let step_run = run
+            .step_runs
+            .entry(step_id.clone())
+            .or_insert_with(|| StepRun::new(&step_id));
+        let claude_calls = std::mem::take(&mut step_run.claude_calls);
+        *step_run = StepRun {
+            claude_calls,
+            ..StepRun::new(&step_id)
+        };
     }
     for step in &plan.steps {
         run.step_runs
@@ -868,8 +891,19 @@ async fn run_step_with_policy(
             step_timeout_secs = timeout_secs.unwrap_or_default(),
             step_timeout_configured = timeout_secs.is_some()
         );
-        let execution =
-            run_step_with_child_progress(ctx.clone(), run, config).instrument(step_span);
+        let usage_recorder = usage::RunUsageRecorder::for_attempt(
+            Arc::clone(&config.storage),
+            config.claude_usage_enabled,
+            config.claude_prompts_enabled,
+            run,
+            &step_id,
+            attempt,
+        );
+        let execution = usage::with_attempt_usage(
+            Arc::clone(&usage_recorder),
+            run_step_with_child_progress(ctx.clone(), run, config),
+        )
+        .instrument(step_span);
         let (outcome, timed_out) = match timeout_secs {
             Some(secs) => match tokio::time::timeout(
                 Duration::from_secs(secs.saturating_add(timeout_grace_secs)),
@@ -888,6 +922,9 @@ async fn run_step_with_policy(
             },
             None => (execution.await, false),
         };
+        // Calls of failed and timed-out attempts are kept as well; the saves
+        // below (or the caller's, on success) persist them with the run.
+        usage_recorder.drain_into(run);
         let attempt_duration_ms = attempt_started.elapsed().as_millis() as u64;
 
         match outcome {
@@ -1142,6 +1179,8 @@ mod execution_policy_tests {
             progress,
             human,
             llm_keys: LlmKeys::default(),
+            claude_usage_enabled: true,
+            claude_prompts_enabled: false,
             source: None,
         }
     }

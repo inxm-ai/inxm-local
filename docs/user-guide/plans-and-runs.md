@@ -16,6 +16,13 @@ A plan is the versioned, executable definition of a workflow. It contains:
 
 Dependencies form a graph rather than a fixed list of commands. The executor runs a step only after its dependencies are complete, so later steps can consume validated inputs and earlier step outputs. A plan can be edited or repaired into a new version while keeping the plan identity and its history.
 
+## Sharing plans
+
+If you want to share a plan with someone, open **Plans**, choose **Export** on that plan, and send them the JSON file. They can import it by choosing **Import plan** on their **Plans** page and selecting the file. If they already have a plan with the same name, INXM asks whether to import it as a new version, save it as a separate copy, or cancel.
+
+!!! warning "The exported file does not include the tools"
+    The JSON file contains the plan, but **not its tools' local setup or credentials**. If a required tool is missing or disabled on the recipient's computer, import will fail and the **Plans** page will list its name. They must add and enable it in **MCP Tools**, then try importing again. Import does not generate tools, call a compiler, or modify the local tool catalog.
+
 ## Runs
 
 A run is one execution of one plan version. Before execution, the invocation is checked against the plan's input contract: missing required values, unknown values, and incorrect types are rejected before work begins.
@@ -23,6 +30,10 @@ A run is one execution of one plan version. Before execution, the invocation is 
 During execution, the run stores its resolved inputs and a record for each step. Step records include status, attempts, timing, outputs, standard output/error where applicable, token usage for reported model work, and failure details. The executor orders dependencies topologically, applies configured timeouts and retries, and persists state after each step. A completed step is not silently rerun because a later step failed.
 
 The run status can be successful, failed, cancelled, or waiting for human input. A `HUMAN_INTERACTION` step creates a checkpoint with either an approval decision or free-text response. The desktop app collects the response in chat; an MCP caller receives a persisted run ID and resumes that same run with the response.
+
+Deleting a run clears its selection in Runs and Chat, including chats that are not currently open. Conversation history is retained, but `/inspect` and `/repair` without an explicit run ID only select runs that still exist.
+
+Execution, resuming, and deletion use an exclusive per-run lock shared by the desktop app and MCP. An executing run cannot be deleted. An idle run waiting for human input can still be deleted; if deletion wins a concurrent resume request, that request fails rather than recreating the run.
 
 ## Repairs
 

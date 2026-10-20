@@ -27,6 +27,8 @@ The Settings view persists these `settings.json` fields:
 | `keep_running_in_background` | Controls close-to-tray behavior |
 | `schedules_paused` | Pauses all schedules without changing their individual enabled state |
 | `telemetry_enabled` | Explicit telemetry consent; only `true` enables collection |
+| `claude_usage_enabled` | Records and displays usage for Anthropic Claude API calls |
+| `claude_prompts_enabled` | Stores request and response bodies for Anthropic Claude API calls |
 
 Other fields control theme, update checks, onboarding state, and Codex sandbox behavior. Prefer the Settings UI so defaults and compatibility behavior remain intact.
 
@@ -48,6 +50,8 @@ Other fields control theme, update checks, onboarding state, and Codex sandbox b
 | `INXM_TELEMETRY_ENDPOINT` | Override the telemetry event endpoint |
 | `ANTHROPIC_API_KEY` | API-key fallback for Claude when the backend is automatic or API-backed |
 | `OPENAI_API_KEY` | API-key fallback for OpenAI when the backend is automatic or API-backed |
+| `INXM_CLAUDE_USAGE=off` | Disable local Anthropic Claude API usage recording and new token summaries for this process; `0`, `false`, and `no` also disable it |
+| `INXM_STORE_CLAUDE_PROMPTS=1` | Turn on direct Anthropic Claude API message storage for this process. See [Claude API token usage](claude-usage.md). |
 
 ## Tool environment
 
@@ -66,6 +70,12 @@ tray is insufficient. Desktop, headless, and MCP-only starts use the same saved
 folders before detecting available programs. Compiler and repair context see
 that environment too; repair does not install software or silently change it.
 An explicit tool or MCP server `PATH` remains authoritative.
+
+For subprocess tools and Local stdio MCP servers, an explicit `PATH` controls
+both launcher lookup and the child's environment, without falling back to the
+app's executable folders. Relative `PATH` entries resolve from the child's
+working directory. On Windows, an explicit `PATHEXT` also controls launcher
+extensions. An absolute launcher path is used directly.
 
 Subprocess tools, Local stdio MCP servers, AI-generated code steps, and agent CLIs run as programs on your machine. Each program always receives:
 

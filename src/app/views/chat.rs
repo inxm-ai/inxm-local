@@ -74,6 +74,10 @@ pub enum Role {
 #[allow(clippy::large_enum_variant)]
 pub enum MessageBody {
     Text(String),
+    PlanCreated {
+        text: String,
+        token_usage: Option<String>,
+    },
     Error(String),
     /// A run has begun, with a direct route to its live details.
     RunStarted {
@@ -272,6 +276,10 @@ pub struct GuidedFlow {
     /// A CompileFromSpec call is in flight (transient, not persisted).
     #[serde(skip)]
     pub awaiting_compile: bool,
+    /// Ties every Claude call of this flow to the plan it produces. Chats
+    /// saved before this field existed get a fresh id on load.
+    #[serde(default = "crate::app::usage::new_creation_session_id")]
+    pub creation_session_id: String,
 }
 
 impl GuidedFlow {
@@ -288,6 +296,7 @@ impl GuidedFlow {
             assess_turns: 0,
             design_pending: false,
             awaiting_compile: false,
+            creation_session_id: crate::app::usage::new_creation_session_id(),
         }
     }
 
@@ -380,6 +389,15 @@ impl ChatState {
         self.plan.as_ref().map(|plan| plan.metadata.id.as_str())
     }
 
+    pub(crate) fn reconcile_runs(&mut self, runs: &[RunListItem]) {
+        if self.workspace_run.as_ref().is_some_and(|binding| {
+            !binding.is_active() && !runs.iter().any(|run| run.id == binding.run_id)
+        }) {
+            self.workspace_run = None;
+            self.reveal_run_details = false;
+        }
+    }
+
     /// Resolve the failed run that `/repair` should target when no explicit
     /// run id was supplied. An inspected failed run is the strongest context;
     /// otherwise the latest failure recorded in this conversation wins.
@@ -387,6 +405,10 @@ impl ChatState {
         self.workspace_run
             .as_ref()
             .filter(|run| run.finished.as_ref().is_some_and(RunStatus::is_failed))
+            .filter(|binding| {
+                runs.iter()
+                    .any(|run| run.id == binding.run_id && run.status.is_failed())
+            })
             .map(|run| run.run_id.clone())
             .or_else(|| {
                 self.plan_id().and_then(|plan_id| {
@@ -401,7 +423,13 @@ impl ChatState {
                     .iter()
                     .rev()
                     .find_map(|message| match &message.body {
-                        MessageBody::RunFailed { run_id, .. } => Some(run_id.clone()),
+                        MessageBody::RunFailed { run_id, .. }
+                            if runs
+                                .iter()
+                                .any(|run| run.id == *run_id && run.status.is_failed()) =>
+                        {
+                            Some(run_id.clone())
+                        }
                         _ => None,
                     })
             })
@@ -413,6 +441,10 @@ impl ChatState {
     fn contextual_run_id(&self, runs: &[RunListItem]) -> Option<String> {
         self.workspace_run
             .as_ref()
+            // A concurrent list snapshot can predate a newly started live run.
+            .filter(|binding| {
+                binding.is_active() || runs.iter().any(|run| run.id == binding.run_id)
+            })
             .map(|run| run.run_id.clone())
             .or_else(|| {
                 self.plan_id().and_then(|plan_id| {
@@ -429,7 +461,11 @@ impl ChatState {
                     .find_map(|message| match &message.body {
                         MessageBody::RunStarted { run_id, .. }
                         | MessageBody::RunFailed { run_id, .. }
-                        | MessageBody::RunCompleted { run_id, .. } => Some(run_id.clone()),
+                        | MessageBody::RunCompleted { run_id, .. }
+                            if runs.iter().any(|run| run.id == *run_id) =>
+                        {
+                            Some(run_id.clone())
+                        }
                         _ => None,
                     })
             })
@@ -658,6 +694,7 @@ pub fn show_side_panel(
     state: &mut ChatState,
     sources: &SuggestionSources,
     engine: &EngineHandle,
+    show_claude_usage: bool,
 ) -> Option<ChatViewAction> {
     let mut chat_action = None;
     let reveal_run_details = std::mem::take(&mut state.reveal_run_details);
@@ -722,6 +759,7 @@ pub fn show_side_panel(
                         plan,
                         state.workspace_run.as_ref(),
                         &plan_runs,
+                        show_claude_usage,
                     )
                 })
             });
@@ -807,6 +845,7 @@ pub fn show(
     sources: &SuggestionSources,
     engine: &EngineHandle,
     auto_mode: bool,
+    show_claude_usage: bool,
 ) -> Option<ChatViewAction> {
     let mut chat_action = None;
 
@@ -853,7 +892,14 @@ pub fn show(
                                 || flow.awaiting_compile;
                             flow_progress(ui, flow, working);
                         }
-                        messages(ui, state, sources, engine, &mut chat_action);
+                        messages(
+                            ui,
+                            state,
+                            sources,
+                            engine,
+                            &mut chat_action,
+                            show_claude_usage,
+                        );
                         status_row(ui, state);
                         if state.plan.is_none()
                             && let Some(flow) = &state.flow
@@ -996,6 +1042,7 @@ fn messages(
     sources: &SuggestionSources,
     engine: &EngineHandle,
     chat_action: &mut Option<ChatViewAction>,
+    show_claude_usage: bool,
 ) {
     let mut deferred: Vec<EngineCommand> = Vec::new();
     let mut deferred_insight_commands: Vec<String> = Vec::new();
@@ -1033,7 +1080,15 @@ fn messages(
         let msg_id = Id::new("chat_msg").with(message.id);
         anim::entrance(ui, msg_id, 0.0, |ui| {
             match &mut message.body {
-                MessageBody::Text(text) => text_bubble(ui, message.role, text),
+                MessageBody::Text(text) => text_bubble(ui, message.role, text, None),
+                MessageBody::PlanCreated { text, token_usage } => text_bubble(
+                    ui,
+                    message.role,
+                    text,
+                    show_claude_usage
+                        .then_some(token_usage.as_deref())
+                        .flatten(),
+                ),
                 MessageBody::Error(text) => error_bubble(ui, text),
                 MessageBody::RunStarted {
                     run_id,
@@ -1065,7 +1120,9 @@ fn messages(
                     if owned_plan_id.as_deref() == Some(plan.metadata.id.as_str()) {
                         return;
                     }
-                    if let Some(action) = plan_card::show(ui, msg_id, plan, run.as_ref()) {
+                    if let Some(action) =
+                        plan_card::show(ui, msg_id, plan, run.as_ref(), show_claude_usage)
+                    {
                         match action {
                             PlanCardAction::Run { plan_id, inputs } => {
                                 deferred.push(EngineCommand::RunPlan {
@@ -1261,7 +1318,7 @@ fn agent_transcript_card(ui: &mut Ui, step_id: &str, lines: &[AgentTranscriptLin
     });
 }
 
-fn text_bubble(ui: &mut Ui, role: Role, text: &str) {
+fn text_bubble(ui: &mut Ui, role: Role, text: &str, token_usage: Option<&str>) {
     let (layout, fill, width_share) = match role {
         Role::User => (Layout::right_to_left(Align::TOP), theme::user_bubble(), 0.8),
         Role::Assistant => (Layout::left_to_right(Align::TOP), theme::surface(), 0.9),
@@ -1269,9 +1326,23 @@ fn text_bubble(ui: &mut Ui, role: Role, text: &str) {
     ui.with_layout(layout, |ui| {
         ui.set_max_width(ui.available_width() * width_share);
         theme::bubble_frame(fill).show(ui, |ui| {
-            widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
+                if let Some(token_usage) = token_usage {
+                    ui.add_space(4.0);
+                    token_usage_subline(ui, token_usage);
+                }
+            });
         });
     });
+}
+
+fn token_usage_subline(ui: &mut Ui, token_usage: &str) {
+    ui.label(
+        RichText::new(token_usage)
+            .size(theme::FONT_SMALL)
+            .color(theme::text_muted()),
+    );
 }
 
 fn error_bubble(ui: &mut Ui, text: &str) {
@@ -1376,15 +1447,33 @@ fn run_completed_card(ui: &mut Ui, run_id: &str, text: &str) -> Option<EngineCom
         // Text and action on separate rows: a wrapped label next to a button
         // in one `horizontal` fills the full width first and pushes the
         // button past the bubble, where the side panel clips it.
-        widgets::wrapped_label(ui, RichText::new(text).color(theme::text()));
-        ui.add_space(6.0);
-        if widgets::ghost_button(ui, "Show details").clicked() {
-            command = Some(EngineCommand::InspectRun {
-                run_id: run_id.to_owned(),
-            });
-        }
+        ui.with_layout(Layout::top_down(Align::Min), |ui| {
+            let (summary, token_usage) = split_trailing_token_usage(text);
+            widgets::wrapped_label(ui, RichText::new(summary).color(theme::text()));
+            if let Some(token_usage) = token_usage {
+                ui.add_space(4.0);
+                token_usage_subline(ui, token_usage);
+            }
+            ui.add_space(6.0);
+            if widgets::ghost_button(ui, "Show details").clicked() {
+                command = Some(EngineCommand::InspectRun {
+                    run_id: run_id.to_owned(),
+                });
+            }
+        });
     });
     command
+}
+
+fn split_trailing_token_usage(text: &str) -> (&str, Option<&str>) {
+    let Some((summary, token_usage)) = text.rsplit_once('\n') else {
+        return (text, None);
+    };
+    if token_usage.starts_with("Claude tokens: ") || token_usage.starts_with("Tokens: ") {
+        (summary, Some(token_usage))
+    } else {
+        (text, None)
+    }
 }
 
 /// Contextual status strip shown only while working or waiting for the user.
@@ -1865,6 +1954,7 @@ fn design_action_bar(ui: &mut Ui, state: &mut ChatState, engine: &EngineHandle, 
             spec: flow.spec(),
             design: Some(Box::new(design)),
             conversation: flow.conversation.clone(),
+            creation_session_id: flow.creation_session_id.clone(),
         });
     }
     ui.add_space(2.0);
@@ -2440,6 +2530,7 @@ fn continue_to_design(state: &mut ChatState, engine: &EngineHandle) {
         conversation: flow.conversation.clone(),
         previous_design: None,
         feedback: None,
+        creation_session_id: flow.creation_session_id.clone(),
     });
 }
 
@@ -3196,6 +3287,7 @@ fn handle_intent_message(
             engine.send(EngineCommand::AssessIntent {
                 intent: flow.intent.clone(),
                 conversation: flow.conversation.clone(),
+                creation_session_id: flow.creation_session_id.clone(),
             });
         }
         Some(FlowPhase::Design) => {
@@ -3206,6 +3298,7 @@ fn handle_intent_message(
                 conversation: flow.conversation.clone(),
                 previous_design: flow.design.clone().map(Box::new),
                 feedback: Some(text),
+                creation_session_id: flow.creation_session_id.clone(),
             });
         }
         None if was_blank => {
@@ -3213,6 +3306,7 @@ fn handle_intent_message(
             engine.send(EngineCommand::AssessIntent {
                 intent: text,
                 conversation: flow.conversation.clone(),
+                creation_session_id: flow.creation_session_id.clone(),
             });
             state.flow = Some(flow);
         }
@@ -3227,6 +3321,12 @@ fn handle_intent_message(
 
 /// Turn a finished run into a short summary line for the conversation.
 pub fn run_summary_text(run: &Run) -> String {
+    run_summary_text_with_usage(run, true)
+}
+
+/// Turn a finished run into a summary. `show_claude_usage` controls only the
+/// recorded Claude totals; the per-step token summary is always shown.
+pub fn run_summary_text_with_usage(run: &Run, show_claude_usage: bool) -> String {
     let duration = run
         .finished_at
         .map(|end| end - run.started_at)
@@ -3248,16 +3348,18 @@ pub fn run_summary_text(run: &Run) -> String {
         other => format!("Run ended with status: {other}."),
     };
 
-    let mut text = match token_usage_text(run) {
-        Some(tokens) => format!("{headline}\n{tokens}"),
-        None => headline,
-    };
+    let mut text = headline;
 
     if run.status == RunStatus::Succeeded
         && let Some(final_result) = final_result_text(run)
     {
         text.push_str("\n\n");
         text.push_str(&final_result);
+    }
+
+    if let Some(tokens) = token_usage_text(run, show_claude_usage) {
+        text.push('\n');
+        text.push_str(&tokens);
     }
 
     text
@@ -3287,7 +3389,13 @@ fn format_output_value(value: &serde_json::Value) -> String {
 
 /// A one-line token-consumption summary for a finished run, or `None` when
 /// no prompt or agent step reported usage.
-fn token_usage_text(run: &Run) -> Option<String> {
+fn token_usage_text(run: &Run, show_claude_usage: bool) -> Option<String> {
+    // Provider-reported Claude usage is exact and covers failed attempts, so
+    // it replaces the per-step summary whenever any call was recorded.
+    let claude = run.claude_totals();
+    if show_claude_usage && !claude.is_empty() {
+        return Some(crate::app::usage::run_totals_text(&claude));
+    }
     let summary = run.token_usage_summary();
     if summary.is_empty() {
         return None;
@@ -3329,6 +3437,9 @@ pub fn binding_from_run(run: &Run) -> RunBinding {
 /// binding — everything the plan card displays.
 fn fill_binding(binding: &mut RunBinding, run: &Run) {
     binding.inputs = run.inputs.clone();
+    let usage = run.token_usage_summary();
+    binding.token_usage_total = (!usage.is_empty()).then_some(usage.usage.total());
+    binding.claude_calls = run.archived_claude_calls.clone().into_iter().collect();
     for (step_id, sr) in &run.step_runs {
         if sr.status != StepRunStatus::Pending || !binding.iterations.contains_key(step_id) {
             binding.statuses.insert(step_id.clone(), sr.status.clone());
@@ -3352,6 +3463,13 @@ fn fill_binding(binding: &mut RunBinding, run: &Run) {
             binding
                 .iterations
                 .insert(step_id.clone(), sr.iterations.clone());
+        }
+        if !sr.claude_calls.is_empty() {
+            binding
+                .claude_calls
+                .entry(step_id.clone())
+                .or_default()
+                .extend(sr.claude_calls.iter().cloned());
         }
     }
     binding.finished = Some(run.status.clone());
@@ -3393,6 +3511,18 @@ mod tests {
             config: Default::default(),
             steps: Vec::new(),
             outputs: Vec::new(),
+        }
+    }
+
+    fn listed_run(id: &str, status: RunStatus) -> RunListItem {
+        RunListItem {
+            id: id.to_owned(),
+            plan_id: "plan-1".to_owned(),
+            plan_name: "demo".to_owned(),
+            status,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            source: None,
         }
     }
 
@@ -3641,6 +3771,15 @@ mod tests {
 
     #[test]
     fn repair_context_prefers_an_inspected_failure_then_the_latest_chat_failure() {
+        let failed = RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "boom".to_owned(),
+        };
+        let runs = [
+            listed_run("older-failure", failed.clone()),
+            listed_run("newer-failure", failed.clone()),
+            listed_run("inspected-failure", failed.clone()),
+        ];
         let mut chat = ChatState::default();
         chat.push(
             Role::Assistant,
@@ -3660,27 +3799,28 @@ mod tests {
         );
 
         assert_eq!(
-            chat.contextual_failed_run_id(&[]).as_deref(),
+            chat.contextual_failed_run_id(&runs).as_deref(),
             Some("newer-failure")
         );
 
         chat.workspace_run = Some(RunBinding {
             run_id: "inspected-failure".to_owned(),
-            finished: Some(RunStatus::Failed {
-                failed_step_id: "step".to_owned(),
-                message: "boom".to_owned(),
-            }),
+            finished: Some(failed),
             ..Default::default()
         });
 
         assert_eq!(
-            chat.contextual_failed_run_id(&[]).as_deref(),
+            chat.contextual_failed_run_id(&runs).as_deref(),
             Some("inspected-failure")
         );
     }
 
     #[test]
     fn inspect_context_uses_the_current_workspace_or_latest_chat_run() {
+        let runs = [
+            listed_run("latest-run", RunStatus::Succeeded),
+            listed_run("workspace-run", RunStatus::Succeeded),
+        ];
         let mut chat = ChatState::default();
         chat.push(
             Role::Assistant,
@@ -3690,7 +3830,7 @@ mod tests {
             },
         );
 
-        assert_eq!(chat.contextual_run_id(&[]).as_deref(), Some("latest-run"));
+        assert_eq!(chat.contextual_run_id(&runs).as_deref(), Some("latest-run"));
 
         chat.workspace_run = Some(RunBinding {
             run_id: "workspace-run".to_owned(),
@@ -3698,8 +3838,173 @@ mod tests {
         });
 
         assert_eq!(
-            chat.contextual_run_id(&[]).as_deref(),
+            chat.contextual_run_id(&runs).as_deref(),
             Some("workspace-run")
+        );
+    }
+
+    #[test]
+    fn refreshed_runs_clear_only_deleted_workspace_selections_and_keep_history() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "selected".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            reveal_run_details: true,
+            ..Default::default()
+        };
+        chat.push(
+            Role::Assistant,
+            MessageBody::RunCompleted {
+                run_id: "selected".to_owned(),
+                text: "Historical result".to_owned(),
+            },
+        );
+
+        chat.reconcile_runs(&[listed_run("selected", RunStatus::Succeeded)]);
+
+        assert_eq!(chat.workspace_run.as_ref().unwrap().run_id, "selected");
+        assert!(chat.reveal_run_details);
+
+        chat.reconcile_runs(&[listed_run("other", RunStatus::Succeeded)]);
+
+        assert!(chat.workspace_run.is_none());
+        assert!(!chat.reveal_run_details);
+        assert!(matches!(
+            &chat.messages[0].body,
+            MessageBody::RunCompleted { run_id, text }
+                if run_id == "selected" && text == "Historical result"
+        ));
+        assert_eq!(chat.contextual_run_id(&[]), None);
+    }
+
+    #[test]
+    fn a_snapshot_taken_before_run_start_keeps_the_live_workspace_and_context() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "live-run".to_owned(),
+                ..Default::default()
+            }),
+            reveal_run_details: true,
+            ..Default::default()
+        };
+
+        chat.reconcile_runs(&[]);
+
+        assert_eq!(chat.workspace_run.as_ref().unwrap().run_id, "live-run");
+        assert!(chat.reveal_run_details);
+        assert_eq!(chat.contextual_run_id(&[]).as_deref(), Some("live-run"));
+    }
+
+    #[test]
+    fn inspect_context_skips_deleted_workspace_and_every_historical_run_kind() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for body in [
+            MessageBody::RunCompleted {
+                run_id: "existing".to_owned(),
+                text: "done".to_owned(),
+            },
+            MessageBody::RunStarted {
+                run_id: "deleted".to_owned(),
+                text: "started".to_owned(),
+                active: false,
+            },
+            MessageBody::RunFailed {
+                run_id: "deleted".to_owned(),
+                text: "failed".to_owned(),
+                repair_requested: false,
+            },
+            MessageBody::RunCompleted {
+                run_id: "deleted".to_owned(),
+                text: "done".to_owned(),
+            },
+        ] {
+            chat.push(Role::Assistant, body);
+        }
+
+        assert_eq!(
+            chat.contextual_run_id(&[listed_run("existing", RunStatus::Succeeded)])
+                .as_deref(),
+            Some("existing")
+        );
+        assert_eq!(chat.contextual_run_id(&[]), None);
+        assert_eq!(chat.messages.len(), 4);
+    }
+
+    #[test]
+    fn repair_context_skips_deleted_or_no_longer_failed_runs() {
+        let failed = RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "boom".to_owned(),
+        };
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(failed.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        for run_id in ["existing", "no-longer-failed", "deleted"] {
+            chat.push(
+                Role::Assistant,
+                MessageBody::RunFailed {
+                    run_id: run_id.to_owned(),
+                    text: "failed".to_owned(),
+                    repair_requested: false,
+                },
+            );
+        }
+        let runs = [
+            listed_run("existing", failed),
+            listed_run("no-longer-failed", RunStatus::Succeeded),
+        ];
+
+        assert_eq!(
+            chat.contextual_failed_run_id(&runs).as_deref(),
+            Some("existing")
+        );
+        assert_eq!(chat.contextual_failed_run_id(&[]), None);
+        assert_eq!(chat.messages.len(), 3);
+    }
+
+    #[test]
+    fn command_context_falls_back_to_existing_runs_for_the_owned_plan() {
+        let mut chat = ChatState {
+            workspace_run: Some(RunBinding {
+                run_id: "deleted".to_owned(),
+                finished: Some(RunStatus::Succeeded),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        chat.attach_plan(Box::new(demo_plan(1)));
+        let mut older = listed_run(
+            "older-failure",
+            RunStatus::Failed {
+                failed_step_id: "step".to_owned(),
+                message: "boom".to_owned(),
+            },
+        );
+        older.started_at -= chrono::Duration::seconds(1);
+        let newer = listed_run("newer-success", RunStatus::Succeeded);
+        let runs = [newer, older];
+
+        assert_eq!(
+            chat.contextual_run_id(&runs).as_deref(),
+            Some("newer-success")
+        );
+        assert_eq!(
+            chat.contextual_failed_run_id(&runs).as_deref(),
+            Some("older-failure")
         );
     }
 
@@ -3761,10 +4066,37 @@ mod tests {
         let mut run = succeeded_run();
         run.outputs
             .insert("summary".to_owned(), serde_json::json!("all good"));
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 12,
+            output_tokens: 4,
+        });
+        run.step_runs.insert("summarize".to_owned(), step);
+
         let summary = run_summary_text(&run);
         assert!(
             summary.contains("Final result:\n- summary: all good"),
             "got: {summary}"
+        );
+        assert!(
+            summary.ends_with("Tokens: 1 AI step — 12 in / 4 out (16 total)."),
+            "token usage should follow the final result, got: {summary}"
+        );
+    }
+
+    #[test]
+    fn trailing_run_usage_splits_after_final_result() {
+        let text = "Run succeeded in 8.6 s.\n\nFinal result:\n- summary: all good\nClaude tokens: 3 calls — 12,450 in (8,120 cached) / 1,320 out (13,770 total).";
+
+        let (summary, token_usage) = split_trailing_token_usage(text);
+
+        assert_eq!(
+            summary,
+            "Run succeeded in 8.6 s.\n\nFinal result:\n- summary: all good"
+        );
+        assert_eq!(
+            token_usage,
+            Some("Claude tokens: 3 calls — 12,450 in (8,120 cached) / 1,320 out (13,770 total).")
         );
     }
 
@@ -3781,6 +4113,114 @@ mod tests {
         assert!(
             run_summary_text(&run).contains("Tokens: 1 AI step — 120 in / 30 out (150 total).")
         );
+        assert_eq!(binding_from_run(&run).token_usage_total, Some(150));
+    }
+
+    #[test]
+    fn run_summary_prefers_recorded_claude_usage() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 1,
+            output_tokens: 1,
+        });
+        step.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "call-1".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 4330,
+                "cache_read_input_tokens": 8120,
+                "output_tokens": 1320
+            })),
+        }];
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text(&run);
+        assert!(
+            summary.contains(
+                "Claude tokens: 1 call — 12,450 in (8,120 cached) / 1,320 out (13,770 total)."
+            ),
+            "got: {summary}"
+        );
+        assert!(!summary.contains("AI step"), "got: {summary}");
+        let binding = binding_from_run(&run);
+        assert_eq!(binding.claude_calls["summarize"].len(), 1);
+    }
+
+    #[test]
+    fn archived_claude_usage_survives_step_id_reuse_and_binding_refresh() {
+        let mut run = succeeded_run();
+        let call = |call_id: &str| crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: call_id.to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 20
+            })),
+        };
+        run.archived_claude_calls
+            .insert("summarize".to_owned(), vec![call("old-call")]);
+        assert!(run_summary_text(&run).contains("(120 total)"));
+        assert_eq!(binding_from_run(&run).claude_calls["summarize"].len(), 1);
+
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.claude_calls = vec![call("new-call")];
+        run.step_runs.insert("summarize".to_owned(), step);
+        let mut binding = binding_from_run(&run);
+        fill_binding(&mut binding, &run);
+
+        assert_eq!(
+            binding.claude_calls["summarize"],
+            vec![call("old-call"), call("new-call")]
+        );
+        assert_eq!(run.claude_totals().total, 240);
+        assert!(run_summary_text(&run).contains("(240 total)"));
+    }
+
+    #[test]
+    fn disabling_claude_usage_keeps_the_provider_agnostic_token_summary() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+        });
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text_with_usage(&run, false);
+        assert!(
+            summary.contains("Tokens: 1 AI step — 120 in / 30 out (150 total)."),
+            "got: {summary}"
+        );
+    }
+
+    #[test]
+    fn disabling_claude_usage_hides_recorded_claude_totals() {
+        let mut run = succeeded_run();
+        let mut step = crate::executor::StepRun::new("summarize");
+        step.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 120,
+            output_tokens: 30,
+        });
+        step.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "call-1".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 4330,
+                "output_tokens": 1320
+            })),
+        }];
+        run.step_runs.insert("summarize".to_owned(), step);
+
+        let summary = run_summary_text_with_usage(&run, false);
+        assert!(!summary.contains("Claude tokens:"), "got: {summary}");
+        assert!(summary.contains("Tokens: 1 AI step"), "got: {summary}");
     }
 
     #[test]

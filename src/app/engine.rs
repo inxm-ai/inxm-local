@@ -27,6 +27,7 @@ use crate::plan::normalization::normalize;
 use crate::plan::types::{Plan, PlanMetadata, PlanStatus, StepType};
 use crate::repair;
 use crate::storage::StorageRoot;
+use crate::storage::llm_usage::{CreationPhase, SupportKind, UsageOrigin};
 use crate::storage::patches::{Patch, PatchStatus};
 use crate::storage::plan_edits::PlanEdit;
 use crate::storage::world_fixes::WorldFix;
@@ -43,6 +44,7 @@ use super::console::CompileConsole;
 use super::schedule_store;
 use super::scheduler_lock::{LockAcquisition, SchedulerLock};
 use super::support;
+use super::usage::LedgerRecorder;
 
 /// A UI-nudge hook the engine calls after emitting an event. The desktop wires
 /// in `egui::Context::request_repaint`; headless mode passes a no-op so the
@@ -448,6 +450,12 @@ pub struct AppSettings {
     /// `--no-telemetry`) override this in `crate::telemetry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub telemetry_enabled: Option<bool>,
+    /// Store and display local Claude API token usage.
+    #[serde(default)]
+    pub claude_usage_enabled: bool,
+    /// Store direct Claude API request bodies alongside usage records.
+    #[serde(default)]
+    pub claude_prompts_enabled: bool,
     /// Only consulted when `backend == BackendChoice::Codex`. See
     /// [`crate::llm::CodexSandboxMode`].
     #[serde(default)]
@@ -491,6 +499,8 @@ impl Default for AppSettings {
             // that should see the first-run assistant.
             onboarding_completed: false,
             telemetry_enabled: None,
+            claude_usage_enabled: false,
+            claude_prompts_enabled: false,
             codex_sandbox_mode: crate::llm::CodexSandboxMode::default(),
         }
     }
@@ -805,6 +815,9 @@ pub enum EngineCommand {
     AssessIntent {
         intent: String,
         conversation: Vec<compiler::SpecTurn>,
+        /// Guided-flow id that ties this call's Claude usage to the plan
+        /// the flow eventually produces.
+        creation_session_id: String,
     },
     /// DESIGN phase: produce (or, with `previous_design` + `feedback`,
     /// revise) a reviewable solution design for a refined spec.
@@ -813,6 +826,7 @@ pub enum EngineCommand {
         conversation: Vec<compiler::SpecTurn>,
         previous_design: Option<Box<compiler::SolutionDesign>>,
         feedback: Option<String>,
+        creation_session_id: String,
     },
     /// Compile a plan from a refined spec (and optionally an approved
     /// design). The result is immediately usable.
@@ -821,6 +835,7 @@ pub enum EngineCommand {
         spec: compiler::SpecDraft,
         design: Option<Box<compiler::SolutionDesign>>,
         conversation: Vec<compiler::SpecTurn>,
+        creation_session_id: String,
     },
     EditPlan {
         plan_ref: String,
@@ -869,6 +884,10 @@ pub enum EngineCommand {
     /// Abort an in-progress run: drops its execution and persists it as
     /// `RunStatus::Cancelled`. No-op if the run has already finished.
     AbortRun {
+        run_id: String,
+    },
+    /// Remove a finished run's stored record. Refuses runs still executing.
+    DeleteRun {
         run_id: String,
     },
     ListTools,
@@ -1040,6 +1059,7 @@ impl EngineCommandTrace {
             EngineCommand::ResumeRun { .. } => "resume_run",
             EngineCommand::RejectPatch { .. } => "reject_patch",
             EngineCommand::AbortRun { .. } => "abort_run",
+            EngineCommand::DeleteRun { .. } => "delete_run",
             EngineCommand::ListTools => "list_tools",
             EngineCommand::ListPatches => "list_patches",
             EngineCommand::SaveTool { .. } => "save_tool",
@@ -1074,6 +1094,7 @@ impl EngineCommandTrace {
             | EngineCommand::InspectRunReadOnly { run_id }
             | EngineCommand::Repair { run_id }
             | EngineCommand::AbortRun { run_id }
+            | EngineCommand::DeleteRun { run_id }
             | EngineCommand::ResumeRun { run_id, .. } => Some(run_id.clone()),
             _ => None,
         };
@@ -1212,6 +1233,8 @@ pub enum EngineEvent {
     Assistant(String),
     /// An operation failed — rendered as an error bubble.
     Failure(String),
+    /// A desktop plan import failed; the Plans view presents the error there.
+    PlanImportFailed(String),
     CompileStarted {
         intent: String,
     },
@@ -1252,6 +1275,9 @@ pub enum EngineEvent {
     /// A freshly compiled (validated, normalized, saved) plan.
     PlanCompiled {
         plan: Box<Plan>,
+        /// Claude usage of every creation call linked to this plan, when any
+        /// was recorded.
+        creation_usage: Option<crate::storage::llm_usage::TokenTotals>,
     },
     /// A pending, LLM-compiled edit to an existing plan, awaiting approval.
     EditProposed {
@@ -1909,12 +1935,14 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
         EngineCommand::AssessIntent {
             intent,
             conversation,
-        } => assess_intent(env, intent, conversation).await,
+            creation_session_id,
+        } => assess_intent(env, intent, conversation, &creation_session_id).await,
         EngineCommand::GenerateDesign {
             spec,
             conversation,
             previous_design,
             feedback,
+            creation_session_id,
         } => {
             generate_design(
                 env,
@@ -1922,6 +1950,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
                 conversation,
                 previous_design.map(|design| *design),
                 feedback,
+                &creation_session_id,
             )
             .await
         }
@@ -1930,6 +1959,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
             spec,
             design,
             conversation,
+            creation_session_id,
         } => {
             compile_from_spec(
                 env,
@@ -1937,6 +1967,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
                 spec,
                 design.map(|design| *design),
                 conversation,
+                &creation_session_id,
             )
             .await
         }
@@ -2010,6 +2041,7 @@ async fn handle_command(command: EngineCommand, env: &EngineEnv) -> anyhow::Resu
             }
             Ok(())
         }
+        EngineCommand::DeleteRun { run_id } => delete_run(env, &run_id).await,
         EngineCommand::ListTools => {
             announce_catalog(env);
             Ok(())
@@ -2528,7 +2560,19 @@ async fn save_schedule(
     let storage = env.storage()?;
     let plan = resolve_plan(&storage, plan_ref)?;
     let inputs = plan.resolve_inputs(&drop_inputs_deferring_to_defaults(&plan, inputs))?;
-    let normalized = interpret_schedule_expression(env, expression).await?;
+    let settings = AppSettings::load(&env.paths.settings_path);
+    let claude_usage = LedgerRecorder::support(
+        Some(storage.clone()),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        SupportKind::ScheduleCron,
+        Some(plan.metadata.id.as_str()),
+    );
+    let normalized = super::usage::scoped(
+        &claude_usage,
+        interpret_schedule_expression(env, expression),
+    )
+    .await?;
 
     let schedule = schedule_store::Schedule {
         id: uuid::Uuid::new_v4().to_string(),
@@ -3009,6 +3053,7 @@ fn command_failure_event(
         "save_tool" | "rename_tool" | "bulk_save_tools" => {
             EngineEvent::CatalogMutationFailed(message)
         }
+        "import_plan" => EngineEvent::PlanImportFailed(message),
         "mcp_oauth_status" | "mcp_oauth_begin" | "mcp_oauth_cancel" | "mcp_oauth_disconnect" => {
             match mcp_tool_name {
                 Some(tool_name) => EngineEvent::McpOAuthOperationFailed { tool_name, message },
@@ -3079,16 +3124,28 @@ async fn compile(env: &EngineEnv, intent: String) -> anyhow::Result<()> {
         intent: intent.clone(),
     });
     let console = env.attach_compile_console("compile");
+    let claude_usage = LedgerRecorder::creation(
+        env.storage().ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &super::usage::new_creation_session_id(),
+        CreationPhase::Compile,
+        UsageOrigin::Chat,
+        Some(console.clone()),
+    );
 
     let request = compile_request(&catalog, &settings, intent, None);
-    let plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "compilation failed",
-            Some(&console),
+    let plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "compilation failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -3110,8 +3167,14 @@ async fn compile(env: &EngineEnv, intent: String) -> anyhow::Result<()> {
             )
         },
     )?;
+    claude_usage.link_plan(&plan.metadata.id, plan.metadata.version);
+    let creation_usage = crate::llm::claude_usage_enabled(settings.claude_usage_enabled)
+        .then(|| env.storage().ok())
+        .flatten()
+        .and_then(|storage| super::usage::plan_creation_totals(&storage, &plan.metadata.id));
     env.emit(EngineEvent::PlanCompiled {
         plan: Box::new(plan),
+        creation_usage,
     });
     Ok(())
 }
@@ -3155,6 +3218,7 @@ async fn assess_intent(
     env: &EngineEnv,
     intent: String,
     conversation: Vec<compiler::SpecTurn>,
+    creation_session_id: &str,
 ) -> anyhow::Result<()> {
     let catalog = env.catalog()?;
     let settings = AppSettings::load(&env.paths.settings_path);
@@ -3170,8 +3234,16 @@ async fn assess_intent(
         tool_catalog: runnable_tool_catalog(&catalog),
         extra_context: Some(planning_context(&settings)),
     };
-    let mut assessment = backend
-        .assess(&request)
+    let claude_usage = LedgerRecorder::creation(
+        env.storage().ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        creation_session_id,
+        CreationPhase::Assess,
+        UsageOrigin::Chat,
+        None,
+    );
+    let mut assessment = super::usage::scoped(&claude_usage, backend.assess(&request))
         .await
         .map_err(|e| anyhow::anyhow!("intent assessment failed: {e}"))?;
     if let Some(question) = assessment.question.take() {
@@ -3331,6 +3403,7 @@ async fn generate_design(
     conversation: Vec<compiler::SpecTurn>,
     previous_design: Option<compiler::SolutionDesign>,
     feedback: Option<String>,
+    creation_session_id: &str,
 ) -> anyhow::Result<()> {
     let catalog = env.catalog()?;
     let settings = AppSettings::load(&env.paths.settings_path);
@@ -3346,8 +3419,16 @@ async fn generate_design(
         feedback,
         extra_context: Some(planning_context(&settings)),
     };
-    let mut design = backend
-        .design(&request)
+    let claude_usage = LedgerRecorder::creation(
+        env.storage().ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        creation_session_id,
+        CreationPhase::Design,
+        UsageOrigin::Chat,
+        None,
+    );
+    let mut design = super::usage::scoped(&claude_usage, backend.design(&request))
         .await
         .map_err(|e| anyhow::anyhow!("solution design failed: {e}"))?;
     normalize_agent_outline(&mut design, &settings);
@@ -3458,6 +3539,7 @@ async fn compile_from_spec(
     spec: compiler::SpecDraft,
     mut design: Option<compiler::SolutionDesign>,
     conversation: Vec<compiler::SpecTurn>,
+    creation_session_id: &str,
 ) -> anyhow::Result<()> {
     let catalog = env.catalog()?;
     let settings = AppSettings::load(&env.paths.settings_path);
@@ -3473,6 +3555,15 @@ async fn compile_from_spec(
         intent: intent.clone(),
     });
     let console = env.attach_compile_console("compile from spec");
+    let claude_usage = LedgerRecorder::creation(
+        env.storage().ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        creation_session_id,
+        CreationPhase::Compile,
+        UsageOrigin::Chat,
+        Some(console.clone()),
+    );
 
     let mut request = compile_request(&catalog, &settings, intent, None);
     request.extra_context = Some(spec_compile_context(
@@ -3481,14 +3572,17 @@ async fn compile_from_spec(
         design.as_ref(),
         &conversation,
     ));
-    let mut plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "compilation failed",
-            Some(&console),
+    let mut plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "compilation failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -3512,8 +3606,14 @@ async fn compile_from_spec(
             )
         },
     )?;
+    claude_usage.link_plan(&plan.metadata.id, plan.metadata.version);
+    let creation_usage = crate::llm::claude_usage_enabled(settings.claude_usage_enabled)
+        .then(|| env.storage().ok())
+        .flatten()
+        .and_then(|storage| super::usage::plan_creation_totals(&storage, &plan.metadata.id));
     env.emit(EngineEvent::PlanCompiled {
         plan: Box::new(plan),
+        creation_usage,
     });
     Ok(())
 }
@@ -3556,6 +3656,15 @@ async fn edit_plan(env: &EngineEnv, plan_ref: &str, instruction: String) -> anyh
         instruction: instruction.clone(),
     });
     let console = env.attach_compile_console("edit plan");
+    let claude_usage = LedgerRecorder::edit(
+        Some(storage.clone()),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        &existing.metadata.id,
+        existing.metadata.version,
+        UsageOrigin::Chat,
+        Some(console.clone()),
+    );
 
     let request = edit_compile_request(
         &storage,
@@ -3564,14 +3673,17 @@ async fn edit_plan(env: &EngineEnv, plan_ref: &str, instruction: String) -> anyh
         instruction.clone(),
         existing.clone(),
     )?;
-    let proposed_plan = crate::llm::with_cli_line_sink(
-        std::sync::Arc::new(console.clone()),
-        compile_validate_normalize(
-            &backend,
-            request,
-            &catalog,
-            "plan edit failed",
-            Some(&console),
+    let proposed_plan = super::usage::scoped(
+        &claude_usage,
+        crate::llm::with_cli_line_sink(
+            std::sync::Arc::new(console.clone()),
+            compile_validate_normalize(
+                &backend,
+                request,
+                &catalog,
+                "plan edit failed",
+                Some(&console),
+            ),
         ),
     )
     .await
@@ -3759,6 +3871,7 @@ pub(crate) async fn compile_validate_normalize(
                  regenerate once…"
                     .to_owned(),
             );
+            crate::llm::set_usage_phase(super::usage::PHASE_COMPILE_REGENERATE);
             let mut retry = original_request.clone();
             retry.intent = format!(
                 "{}\n\nYour previous response could not be parsed as plan JSON: {}. Regenerate the complete plan. Return strict valid JSON, correctly escape every inline script and multiline string, and keep descriptions and scripts concise.",
@@ -3813,6 +3926,7 @@ pub(crate) async fn compile_validate_normalize(
             retry.intent, feedback
         );
         retry.existing_plan = Some(plan);
+        crate::llm::set_usage_phase(super::usage::PHASE_COMPILE_VALIDATION_RETRY);
         plan = match backend.compile(retry).await {
             Ok(plan) => plan,
             Err(crate::error::CompilerError::PlanValidationFailed { errors, .. }) => {
@@ -3891,12 +4005,13 @@ async fn run_plan_with_timeout(
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         source: Some(source),
     };
 
     let plan_for_events = plan.clone();
-    let execution = executor::execute(plan, config);
-    tokio::pin!(execution);
+    let mut execution = Box::pin(executor::execute(plan, config));
 
     // Fires when the user clicks "Abort" on this run (see `abort_run`); the
     // sender is only registered in `env.run_cancellations` once `run_id` is
@@ -3943,6 +4058,7 @@ async fn run_plan_with_timeout(
             }
         }
     };
+    drop(execution);
 
     if matches!(&outcome, RunLoopOutcome::Finished(_))
         && let Some(id) = &run_id
@@ -3972,11 +4088,8 @@ async fn run_plan_with_timeout(
             }
         },
         RunLoopOutcome::Aborted => {
-            // `execution` is simply never polled again from here on — it is
-            // abandoned in place and drops when this function returns. Only
-            // stdout/stderr capture tasks the executor may have spawned can
-            // outlive that point, and those exit on their own once the
-            // underlying child process's pipes close.
+            // The executor has been dropped before persisting cancellation,
+            // releasing its lifecycle lock and stopping further checkpoint writes.
             let Some(id) = run_id else {
                 // Aborted before a run id was ever announced — nothing was
                 // persisted, so there is nothing to mark cancelled.
@@ -4048,7 +4161,34 @@ async fn abort_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<AbortOutcome
     Ok(AbortOutcome::Unavailable)
 }
 
+/// Delete a finished run's record. Token-usage ledger entries stay: they are
+/// spend history, not run state.
+async fn delete_run(env: &EngineEnv, run_id: &str) -> anyhow::Result<()> {
+    let cancellations = env.run_cancellations.lock().await;
+    if cancellations.contains_key(run_id) {
+        anyhow::bail!("Run {run_id} is still running. Abort it before deleting.");
+    }
+    env.paths
+        .mutations
+        .run_named("run.delete", env.triggered_by(), || {
+            let storage = env.storage()?;
+            let _lifecycle = storage.runs().lock_lifecycle(run_id)?;
+            if matches!(
+                storage.runs().load(run_id)?.status,
+                executor::RunStatus::Running
+            ) {
+                anyhow::bail!("Run {run_id} is still running. Abort it before deleting.");
+            }
+            storage.runs().delete(run_id)?;
+            Ok(())
+        })?;
+    drop(cancellations);
+    env.emit(EngineEvent::RunList(list_runs(env)?));
+    Ok(())
+}
+
 fn mark_run_cancelled(storage: &StorageRoot, run_id: &str) -> anyhow::Result<Run> {
+    let _lifecycle = storage.runs().lock_lifecycle(run_id)?;
     mark_run_cancelled_inner(storage, run_id, false)
 }
 
@@ -4108,7 +4248,7 @@ async fn resume_run(
     let storage = Arc::new(env.storage()?);
     let catalog = env.catalog()?;
 
-    let run = load_run_by_prefix(&storage, run_id)?;
+    let (run, _lifecycle) = load_run_for_execution(&storage, run_id)?;
     if !run.status.is_failed() {
         anyhow::bail!(
             "run '{}' has not failed (status: {}); nothing to resume",
@@ -4146,6 +4286,8 @@ async fn resume_run(
         progress: Some(progress_tx),
         human: Some(human_tx),
         llm_keys: llm_keys_from(&settings),
+        claude_usage_enabled: crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        claude_prompts_enabled: crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
         // Resume keeps the run's existing source; the executor's resume path
         // does not read this field.
         source: None,
@@ -4160,25 +4302,6 @@ async fn resume_run(
         cancellations.insert(run_id.clone(), RunCancellation::Active(cancel_tx));
     }
     tokio::pin!(cancel_rx);
-
-    // A concurrent resume may have loaded the same failed record before this
-    // command reserved the registry slot. Re-read after reservation so a
-    // cancellation that just completed cannot be resumed from stale state.
-    let run = match storage.runs().load(&run_id) {
-        Ok(run) if run.status.is_failed() => run,
-        Ok(run) => {
-            env.run_cancellations.lock().await.remove(&run_id);
-            anyhow::bail!(
-                "run '{}' has not failed (status: {}); nothing to resume",
-                run.id,
-                run.status
-            );
-        }
-        Err(error) => {
-            env.run_cancellations.lock().await.remove(&run_id);
-            return Err(error.into());
-        }
-    };
 
     // The run id is already known (this continues an existing run rather
     // than minting one), so — unlike `run_plan` — there is no need to wait
@@ -4657,7 +4780,20 @@ fn delete_tool(env: &EngineEnv, name: &str) -> anyhow::Result<()> {
 /// dedicated event rather than the generic `Failure` bubble, so the MCP view
 /// can show the result (or error) inline instead of routing it through chat.
 async fn synthesize_tool(env: &EngineEnv, description: String) -> anyhow::Result<()> {
-    match synthesize_tool_from_description(env, &description).await {
+    let settings = AppSettings::load(&env.paths.settings_path);
+    let claude_usage = LedgerRecorder::support(
+        env.storage().ok(),
+        crate::llm::claude_usage_enabled(settings.claude_usage_enabled),
+        crate::llm::claude_prompts_enabled(settings.claude_prompts_enabled),
+        SupportKind::ToolSynthesis,
+        None,
+    );
+    let synthesized = super::usage::scoped(
+        &claude_usage,
+        synthesize_tool_from_description(env, &description),
+    )
+    .await;
+    match synthesized {
         Ok(entry) => env.emit(EngineEvent::ToolSynthesized {
             entry: Box::new(entry),
         }),
@@ -4811,7 +4947,7 @@ fn export_plan(env: &EngineEnv, plan_ref: &str, dest_path: &Path) -> anyhow::Res
         message.push_str(&format!(
             "\n\nNote: {} tool(s) this plan calls aren't in your local catalog either, so \
              they were exported as bare name-only references and may be harder to \
-             reconstruct on import: {}",
+             identify and configure locally before import: {}",
             missing.len(),
             missing.join(", ")
         ));
@@ -4832,64 +4968,18 @@ async fn import_plan(
     ensure_agent_call_allowed(&bundle.plan, &settings)?;
 
     let catalog = env.catalog()?;
-    let missing: Vec<&ToolReference> = bundle
-        .tools
-        .iter()
-        .filter(|t| !catalog.contains(&t.name))
-        .collect();
-
-    let mut synthesized: Vec<ToolEntry> = Vec::new();
-    if !missing.is_empty() {
-        let backend = create_configured_backend(&settings).map_err(|_| {
-            anyhow::anyhow!(
-                "this plan references {} tool(s) not in your local catalog ({}), and no \
-                 compiler is configured to generate them \u{2014} pick one under Settings, or add \
-                 them manually in MCP Tools first",
-                missing.len(),
-                missing
-                    .iter()
-                    .map(|t| t.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?;
-
-        for reference in &missing {
-            let request = ToolSynthesisRequest {
-                name: reference.name.clone(),
-                description: reference.description.clone(),
-                input_schema: reference.input_schema.clone(),
-                output_schema: reference.output_schema.clone(),
-                kind_hint: reference.kind_hint.clone(),
-                extra_context: Some(EnvProbe::detect().compiler_context()),
-            };
-            let entry = backend.synthesize_tool(request).await.map_err(|e| {
-                anyhow::anyhow!("could not generate tool '{}': {e}", reference.name)
-            })?;
-            synthesized.push(entry);
-        }
+    let unavailable_tools = unavailable_plan_tools(&bundle.tools, &catalog);
+    if !unavailable_tools.is_empty() {
+        anyhow::bail!(
+            "The plan uses tools that are missing or disabled in your local MCP Tools catalog: {}. \
+             Add or configure them and allowlist them, then retry the import",
+            unavailable_tools.join(", ")
+        );
     }
-
-    let updated_catalog = if synthesized.is_empty() {
-        catalog
-    } else {
-        env.paths
-            .mutations
-            .run_named("catalog.import_merge", env.triggered_by(), || {
-                let mut snapshot = env.catalog_snapshot()?;
-                for entry in &synthesized {
-                    if !snapshot.catalog.contains(&entry.name) {
-                        snapshot.upsert(entry.clone())?;
-                    }
-                }
-                snapshot.save_to_file(&env.paths.catalog_path)?;
-                Ok(snapshot.catalog)
-            })?
-    };
 
     let plan = bundle.plan;
 
-    let errors = validator::validate(&plan, &updated_catalog);
+    let errors = validator::validate(&plan, &catalog);
     if !errors.is_empty() {
         let bullet_list: String = errors
             .iter()
@@ -4916,7 +5006,7 @@ async fn import_plan(
     }
     let plan = resolution.plan;
 
-    let mut message = match resolution.outcome {
+    let message = match resolution.outcome {
         ImportOutcome::Imported => format!("Imported \u{201c}{}\u{201d}.", plan.name),
         ImportOutcome::NewVersion => {
             format!("Imported \u{201c}{}\u{201d} as a new version.", plan.name)
@@ -4924,18 +5014,6 @@ async fn import_plan(
         ImportOutcome::Duplicate => format!("Imported \u{201c}{}\u{201d} as a copy.", plan.name),
         ImportOutcome::Rejected => unreachable!("handled above"),
     };
-    if !synthesized.is_empty() {
-        message.push_str(&format!(
-            "\n\n{} new tool(s) were generated and saved as disabled \u{2014} review and \
-             allowlist them under MCP Tools before running this plan: {}",
-            synthesized.len(),
-            synthesized
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
     env.emit(EngineEvent::Assistant(message));
     env.emit(EngineEvent::PlanLoaded {
         plan: Box::new(plan),
@@ -4943,6 +5021,18 @@ async fn import_plan(
     announce_catalog(env);
     env.emit(EngineEvent::PlanList(list_plans(env)?));
     Ok(())
+}
+
+fn unavailable_plan_tools(tools: &[ToolReference], catalog: &ToolCatalog) -> Vec<String> {
+    tools
+        .iter()
+        .filter(|tool| {
+            !catalog
+                .get(&tool.name)
+                .is_some_and(|entry| entry.allowlisted)
+        })
+        .map(|tool| tool.name.clone())
+        .collect()
 }
 
 /// Resolve a same-name import and persist it while holding the one app-wide
@@ -5039,7 +5129,7 @@ pub const RELEASES_PAGE_URL: &str = "https://github.com/inxm-ai/inxm-local/relea
 async fn check_for_updates(env: &EngineEnv, manual: bool) {
     let outcome: anyhow::Result<Option<(String, String)>> = async {
         let client = reqwest::Client::builder()
-            .user_agent(format!("inxm-local/{}", env!("CARGO_PKG_VERSION")))
+            .user_agent(format!("inxm-local/{}", crate::version::DISPLAY))
             .timeout(std::time::Duration::from_secs(10))
             .build()?;
         let response = client
@@ -5065,7 +5155,7 @@ async fn check_for_updates(env: &EngineEnv, manual: bool) {
             .to_owned();
         let latest = parse_semver(tag)
             .ok_or_else(|| anyhow::anyhow!("release response has invalid tag_name"))?;
-        let current = parse_semver(env!("CARGO_PKG_VERSION"))
+        let current = parse_semver(crate::version::DISPLAY)
             .ok_or_else(|| anyhow::anyhow!("application version is invalid"))?;
         Ok((latest > current).then(|| (tag.trim_start_matches('v').to_owned(), url)))
     }
@@ -5430,6 +5520,16 @@ pub(crate) fn load_run_by_prefix(storage: &StorageRoot, run_ref: &str) -> anyhow
     }
 }
 
+/// Resolve the canonical ID, claim its lifecycle, then reload the checkpoint.
+/// The prefix lookup is not authoritative: deletion may win before the claim.
+pub(crate) fn load_run_for_execution(
+    storage: &StorageRoot,
+    run_ref: &str,
+) -> anyhow::Result<(Run, crate::storage::runs::RunLifecycleGuard)> {
+    let resolved = load_run_by_prefix(storage, run_ref)?;
+    Ok(storage.runs().load_for_execution(&resolved.id)?)
+}
+
 /// Decide how a failed run may be resumed.
 ///
 /// A plan version newer than the run's means a repair patch was applied —
@@ -5525,6 +5625,143 @@ mod tests {
             steps: vec![],
             outputs: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn run_deletion_rejects_an_execution_claim_from_another_storage_handle() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::Failed {
+            failed_step_id: "step".to_owned(),
+            message: "failed".to_owned(),
+        };
+        storage.runs().save(&run).unwrap();
+        let independent = StorageRoot::open(&env.paths.data_dir).unwrap();
+        let (_, executing) = load_run_for_execution(&independent, &run.id[..8]).unwrap();
+
+        let error = delete_run(&env, &run.id).await.unwrap_err();
+
+        assert!(error.to_string().contains("in use"), "{error:#}");
+        assert_eq!(storage.runs().load(&run.id).unwrap(), run);
+        let mut other = Run::new("other-plan", 1);
+        other.status = executor::RunStatus::Succeeded;
+        storage.runs().save(&other).unwrap();
+        delete_run(&env, &other.id).await.unwrap();
+
+        drop(executing);
+        delete_run(&env, &run.id).await.unwrap();
+        assert!(load_run_for_execution(&independent, &run.id).is_err());
+        assert!(storage.runs().load(&run.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn deletion_of_an_idle_human_checkpoint_prevents_later_resume() {
+        let tmp = tempfile::tempdir().unwrap();
+        let env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let storage = env.storage().unwrap();
+        let mut run = Run::new("plan", 1);
+        run.status = executor::RunStatus::WaitingForHuman {
+            step_id: "answer".to_owned(),
+        };
+        storage.runs().save(&run).unwrap();
+
+        delete_run(&env, &run.id).await.unwrap();
+
+        assert!(load_run_for_execution(&storage, &run.id).is_err());
+        assert!(
+            resume_run(&env, "", &run.id, Default::default())
+                .await
+                .is_err()
+        );
+        assert!(storage.runs().load(&run.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn resumed_execution_blocks_deletion_until_cancellation_is_persisted() {
+        execution_blocks_deletion_until_cancellation_is_persisted(true).await;
+    }
+
+    #[tokio::test]
+    async fn new_execution_blocks_deletion_until_cancellation_is_persisted() {
+        execution_blocks_deletion_until_cancellation_is_persisted(false).await;
+    }
+
+    async fn execution_blocks_deletion_until_cancellation_is_persisted(resuming: bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = test_env(DataPaths::at(tmp.path().to_owned()));
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        env.evt_tx = events_tx;
+        let env = Arc::new(env);
+        let storage = env.storage().unwrap();
+        let mut plan = empty_plan_v1();
+        plan.steps.push(crate::plan::types::PlanStep {
+            id: "answer".to_owned(),
+            name: "Answer".to_owned(),
+            description: None,
+            config: crate::plan::types::StepConfig::HumanInteraction(
+                crate::plan::types::HumanInteractionConfig {
+                    prompt: "Continue?".to_owned(),
+                    response_field: "answer".to_owned(),
+                    approval_required: false,
+                },
+            ),
+            depends_on: vec![],
+            outputs: vec![],
+            timeout_secs: None,
+            retry: None,
+        });
+        storage.plans().save(&plan).unwrap();
+        plan.metadata.version = 2;
+        storage.plans().save(&plan).unwrap();
+        let mut run = Run::new(plan.metadata.id.clone(), 1);
+        run.status = executor::RunStatus::Failed {
+            failed_step_id: "answer".to_owned(),
+            message: "failed".to_owned(),
+        };
+        let mut step = crate::storage::runs::StepRun::new("answer");
+        step.status = crate::storage::runs::StepRunStatus::Failed;
+        run.step_runs.insert("answer".to_owned(), step);
+        if resuming {
+            storage.runs().save(&run).unwrap();
+        }
+        let execution_env = env.clone();
+        let execution = tokio::spawn(async move {
+            if resuming {
+                resume_run(&execution_env, "", &run.id, Default::default()).await
+            } else {
+                run_plan(&execution_env, &plan.metadata.id, Default::default()).await
+            }
+        });
+        let (run_id, request) = tokio::task::spawn_blocking(move || {
+            loop {
+                let event = events_rx
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("run should request human input");
+                if let EngineEvent::HumanNeeded { run_id, request } = event.event {
+                    break (run_id, request);
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert!(delete_run(&env, &run_id).await.is_err());
+        assert!(storage.runs().lock_lifecycle(&run_id).is_err());
+        assert!(matches!(
+            abort_run(&env, &run_id).await.unwrap(),
+            AbortOutcome::Signalled
+        ));
+        execution.await.unwrap().unwrap();
+        drop(request);
+
+        assert_eq!(
+            storage.runs().load(&run_id).unwrap().status,
+            executor::RunStatus::Cancelled
+        );
+        delete_run(&env, &run_id).await.unwrap();
+        assert!(storage.runs().load(&run_id).is_err());
     }
 
     #[tokio::test]
@@ -6108,6 +6345,7 @@ mod tests {
         assert!(!is_newer_version("v0.1.0", "0.1.0"));
         assert!(!is_newer_version("v0.1.0", "0.2.0"));
         assert!(!is_newer_version("v0.9.0", "0.9.1"));
+        assert!(!is_newer_version("v0.42.4", "v0.42.4"));
     }
 
     #[test]
@@ -6331,6 +6569,8 @@ mod tests {
         assert!(!settings.schedules_paused);
         assert!(!settings.custom_cli_agentic);
         assert!(!settings.experimental_agent_calls);
+        assert!(!settings.claude_usage_enabled);
+        assert!(!settings.claude_prompts_enabled);
         let explicit_opt_out: AppSettings =
             serde_json::from_str(r#"{"keep_running_in_background":false}"#).unwrap();
         assert_eq!(explicit_opt_out.keep_running_in_background, Some(false));
@@ -7218,6 +7458,110 @@ tools:
                 command_failure_event(kind, None, "boom".to_owned()),
                 EngineEvent::Failure(_)
             ));
+        }
+        assert!(matches!(
+            command_failure_event("import_plan", None, "missing tool: echo".to_owned()),
+            EngineEvent::PlanImportFailed(message) if message == "missing tool: echo"
+        ));
+    }
+
+    #[test]
+    fn unavailable_plan_tools_names_missing_and_disabled_entries() {
+        let mut disabled = named_http_tool("disabled");
+        disabled.allowlisted = false;
+        let catalog = ToolCatalog::new(vec![named_http_tool("enabled"), disabled]);
+        let tools = ["enabled", "missing", "disabled"]
+            .into_iter()
+            .map(|name| ToolReference {
+                name: name.to_owned(),
+                description: String::new(),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: serde_json::json!({"type": "object"}),
+                kind_hint: None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            unavailable_plan_tools(&tools, &catalog),
+            vec!["missing".to_owned(), "disabled".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_import_requires_enabled_local_tools_without_changing_catalog() {
+        for allowlisted in [None, Some(false), Some(true)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let paths = DataPaths::at(tmp.path().to_owned());
+            AppSettings {
+                backend: BackendChoice::OpenAiCompatible,
+                api_base: "http://127.0.0.1:9/v1".to_owned(),
+                ..AppSettings::default()
+            }
+            .save(&paths.settings_path)
+            .unwrap();
+            let tool = named_http_tool("required-tool");
+            let exporting_catalog = ToolCatalog::new(vec![tool.clone()]);
+            let local_tools = allowlisted
+                .map(|enabled| ToolEntry {
+                    allowlisted: enabled,
+                    ..tool.clone()
+                })
+                .into_iter()
+                .collect();
+            ToolCatalog::new(local_tools)
+                .save_to_file(&paths.catalog_path)
+                .unwrap();
+            let original_catalog = std::fs::read(&paths.catalog_path).unwrap();
+            let mut plan = empty_plan_v1();
+            plan.steps.push(crate::plan::types::PlanStep {
+                id: "fetch".to_owned(),
+                name: "Fetch".to_owned(),
+                description: None,
+                config: crate::plan::types::StepConfig::ToolCall(
+                    crate::plan::types::ToolCallConfig {
+                        tool: tool.name.clone(),
+                        arguments: indexmap::IndexMap::from([(
+                            "url".to_owned(),
+                            serde_json::json!("https://example.com"),
+                        )]),
+                    },
+                ),
+                depends_on: vec![],
+                outputs: vec![],
+                timeout_secs: None,
+                retry: None,
+            });
+            let (bundle, missing) = PlanBundle::from_plan(&plan, &exporting_catalog);
+            assert!(missing.is_empty());
+            let bundle_path = tmp.path().join("import.json");
+            bundle.save_to_file(&bundle_path).unwrap();
+            let (evt_tx, events) = std::sync::mpsc::channel();
+            let mut env = test_env(paths.clone());
+            env.evt_tx = evt_tx;
+
+            let result = import_plan(&env, &bundle_path, ImportConflictPolicy::Reject).await;
+
+            assert_eq!(
+                std::fs::read(&paths.catalog_path).unwrap(),
+                original_catalog
+            );
+            let storage = env.storage().unwrap();
+            if allowlisted == Some(true) {
+                result.unwrap();
+                assert_eq!(storage.plans().list().unwrap().len(), 1);
+                assert!(
+                    events
+                        .try_iter()
+                        .any(|event| matches!(event.event, EngineEvent::PlanLoaded { .. }))
+                );
+            } else {
+                let message = result.unwrap_err().to_string();
+                assert!(message.contains("required-tool"), "{message}");
+                assert!(message.contains("missing or disabled"), "{message}");
+                assert!(message.contains("retry the import"), "{message}");
+                assert!(storage.plans().list().unwrap().is_empty());
+                assert!(events.try_iter().next().is_none());
+            }
         }
     }
 
