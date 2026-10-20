@@ -149,6 +149,11 @@ pub async fn execute(mut plan: Plan, config: ExecutorConfig) -> Result<Run, Exec
 
     // ── 1. Create run, initialise step entries, save immediately ─────────────
     let mut run = Run::new(plan.metadata.id.clone(), plan.metadata.version);
+    let _lifecycle = config
+        .storage
+        .runs()
+        .lock_lifecycle(&run.id)
+        .map_err(|error| ExecutorError::Storage(error.to_string()))?;
     run.inputs = inputs;
     run.source = config.source;
     for step in &plan.steps {
