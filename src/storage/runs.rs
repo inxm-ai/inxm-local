@@ -5,6 +5,7 @@ use crate::storage::llm_usage::{ClaudeCallSummary, TokenTotals};
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
 use std::path::PathBuf;
 
 // ─── Run state types ──────────────────────────────────────────────────────────
@@ -296,9 +297,46 @@ pub struct RunStore {
     dir: PathBuf,
 }
 
+/// Exclusive ownership of a run's execution/deletion lifecycle.
+/// Closing the file releases the OS lock, including after a process exits.
+pub struct RunLifecycleGuard {
+    _file: File,
+}
+
 impl RunStore {
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
+    }
+
+    /// Claim a run without waiting for another executor or deletion to finish.
+    /// Lock files must not be removed: every contender must lock the same inode.
+    pub fn lock_lifecycle(&self, run_id: &str) -> Result<RunLifecycleGuard, StorageError> {
+        super::validate_record_id(run_id)?;
+        let locks = self.dir.join(".locks");
+        std::fs::create_dir_all(&locks)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(locks.join(format!("{run_id}.lock")))?;
+        fs2::FileExt::try_lock_exclusive(&file).map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("run '{run_id}' is in use or could not be locked: {error}"),
+            )
+        })?;
+        Ok(RunLifecycleGuard { _file: file })
+    }
+
+    /// Reload the authoritative checkpoint while excluding deletion and resume.
+    pub fn load_for_execution(
+        &self,
+        run_id: &str,
+    ) -> Result<(Run, RunLifecycleGuard), StorageError> {
+        let lifecycle = self.lock_lifecycle(run_id)?;
+        let run = self.load(run_id)?;
+        Ok((run, lifecycle))
     }
 
     /// Persist (or update) a run.
@@ -605,6 +643,46 @@ mod tests {
             store.delete(&run.id),
             Err(StorageError::NotFound { kind: "run", .. })
         ));
+    }
+
+    #[test]
+    fn lifecycle_lock_is_shared_across_stores_and_released_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = store_in(&tmp);
+        let second = store_in(&tmp);
+        let guard = first.lock_lifecycle("same-run").unwrap();
+
+        assert!(second.lock_lifecycle("same-run").is_err());
+        let other = second.lock_lifecycle("other-run").unwrap();
+        drop(guard);
+        let reacquired = second.lock_lifecycle("same-run").unwrap();
+        assert!(first.lock_lifecycle("same-run").is_err());
+        drop(reacquired);
+        drop(other);
+        assert!(first.lock_lifecycle("same-run").is_ok());
+    }
+
+    #[test]
+    fn execution_claim_reloads_instead_of_reusing_a_deleted_checkpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp);
+        let run = Run::new("plan", 1);
+        store.save(&run).unwrap();
+        let stale = store.load(&run.id).unwrap();
+        {
+            let _deleting = store.lock_lifecycle(&run.id).unwrap();
+            store.delete(&run.id).unwrap();
+        }
+
+        assert!(matches!(
+            store.load_for_execution(&stale.id),
+            Err(StorageError::NotFound { .. })
+        ));
+        assert!(matches!(
+            store.load(&run.id),
+            Err(StorageError::NotFound { .. })
+        ));
+        assert!(store.lock_lifecycle(&run.id).is_ok());
     }
 
     #[test]

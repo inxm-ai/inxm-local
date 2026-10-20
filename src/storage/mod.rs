@@ -11,6 +11,7 @@
 //!       current.json   — copy of the latest version
 //!   runs/
 //!     {run-id}.json    — full run state
+//!     .locks/{run-id}.lock — stable per-run OS lock files (retained after deletion)
 //!   patches/
 //!     {patch-id}.json  — patch proposal + approval status
 //!   llm-usage/
