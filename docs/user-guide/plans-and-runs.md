@@ -33,6 +33,8 @@ The run status can be successful, failed, cancelled, or waiting for human input.
 
 Deleting a run clears its selection in Runs and Chat, including chats that are not currently open. Conversation history is retained, but `/inspect` and `/repair` without an explicit run ID only select runs that still exist.
 
+Execution, resuming, and deletion use an exclusive per-run lock shared by the desktop app and MCP. An executing run cannot be deleted. An idle run waiting for human input can still be deleted; if deletion wins a concurrent resume request, that request fails rather than recreating the run.
+
 ## Repairs
 
 Repair is a proposal workflow, not an automatic rewrite. After a failed run is classified, the compiler proposes a constrained patch and the user applies or rejects it. Applying a patch creates a new plan version. Resuming then resets the failed step and its downstream dependents, while preserving unrelated successful work.
