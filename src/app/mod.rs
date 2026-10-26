@@ -1956,7 +1956,7 @@ impl InxmApp {
             if !self.on_blank_chat() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.add_space(12.0);
-                    if widgets::primary_icon_button(ui, widgets::Icon::Plus)
+                    if widgets::quiet_icon_button(ui, widgets::Icon::Plus)
                         .on_hover_text("New chat")
                         .clicked()
                     {
@@ -2547,14 +2547,16 @@ impl eframe::App for InxmApp {
         // same way with the same, quieter visuals.
         let nav_width_id = egui::Id::new("nav_panel_width");
         let nav_width = widgets::panel_width(ctx, nav_width_id, theme::SIDEBAR_WIDTH);
+        // No frame stroke: egui counts a frame stroke as margin but sizes
+        // `SidePanel` content from `inner_margin` only, so a 1px stroke made
+        // the content 2px wider than `exact_width`. On a left panel that
+        // overflow leaves a 1px unpainted gap at the boundary, which shows
+        // eframe's near-black clear color as a dark line. The divider itself
+        // is egui's panel separator, painted with `separator_stroke()`.
         let nav_panel = egui::SidePanel::left("nav_panel")
             .exact_width(nav_width)
             .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(theme::panel())
-                    .stroke(egui::Stroke::new(1.0_f32, theme::divider())),
-            )
+            .frame(egui::Frame::new().fill(theme::panel()))
             .show_animated(ctx, !self.sidebar_collapsed, |ui| self.sidebar(ui));
         if !self.sidebar_collapsed
             && let Some(nav_panel) = &nav_panel

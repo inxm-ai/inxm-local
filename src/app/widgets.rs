@@ -263,6 +263,48 @@ pub fn ghost_icon_button(ui: &mut Ui, icon: Icon) -> Response {
     response
 }
 
+/// Hit area of [`quiet_icon_button`]; smaller than the 30px ghost/primary
+/// icon buttons because it sits inline with small section labels.
+const QUIET_ICON_BUTTON_SIZE: f32 = 22.0;
+/// Glyph size inside [`quiet_icon_button`] — close to the cap height of
+/// `FONT_SMALL` text so the icon reads as part of the label row.
+const QUIET_ICON_SIZE: f32 = 10.0;
+
+/// A borderless icon button for low-emphasis actions beside text, such as the
+/// "new chat" plus next to the Plan-Chats section label. At rest only the
+/// icon shows (the surface fill blends into the panel); hovering fades in the
+/// same soft fill the other buttons use.
+pub fn quiet_icon_button(ui: &mut Ui, icon: Icon) -> Response {
+    let font = TextStyle::Button.resolve(ui.style());
+    let galley = ui
+        .painter()
+        .layout_no_wrap(String::new(), font, theme::text());
+    let response = paint_styled_button(
+        ui,
+        galley,
+        vec2(QUIET_ICON_BUTTON_SIZE, QUIET_ICON_BUTTON_SIZE),
+        ButtonStyle {
+            fill: theme::surface(),
+            fill_hover: theme::control_hover(),
+            fill_focus: theme::surface(),
+            fill_pressed: theme::control_hover(),
+            text: theme::text(),
+            stroke: None,
+        },
+        true,
+    );
+    if ui.is_rect_visible(response.rect) {
+        paint_icon_sized(
+            ui.painter(),
+            response.rect,
+            icon,
+            theme::text(),
+            QUIET_ICON_SIZE,
+        );
+    }
+    response
+}
+
 /// A compact, prominent icon-only button using the filled accent style —
 /// for primary actions that don't need a text label (e.g. "new chat").
 pub fn primary_icon_button(ui: &mut Ui, icon: Icon) -> Response {
@@ -498,8 +540,21 @@ pub enum Icon {
 
 /// Paint `icon` centred in `rect` with the given color.
 pub fn paint_icon(painter: &egui::Painter, rect: Rect, icon: Icon, color: Color32) {
+    paint_icon_sized(painter, rect, icon, color, 14.0);
+}
+
+/// [`paint_icon`] with an explicit icon edge length. Only the simple glyphs
+/// (e.g. [`Icon::Plus`]) scale cleanly; the others use fixed offsets tuned
+/// for the 14px default.
+pub fn paint_icon_sized(
+    painter: &egui::Painter,
+    rect: Rect,
+    icon: Icon,
+    color: Color32,
+    size: f32,
+) {
     let stroke = Stroke::new(1.6_f32, color);
-    let r = Rect::from_center_size(rect.center(), vec2(14.0, 14.0));
+    let r = Rect::from_center_size(rect.center(), vec2(size, size));
     match icon {
         Icon::Chat => {
             let bubble = Rect::from_min_max(r.min, Pos2::new(r.max.x, r.max.y - 3.5));
