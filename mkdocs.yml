@@ -14,6 +14,8 @@ extra_css:
     - assets/inxm-overrides.css
 markdown_extensions:
   - admonition
+exclude_docs: |
+  agents.md
 nav:
   - Home: index.md
   - Getting started:
@@ -36,8 +38,9 @@ nav:
       - Configuration: reference/configuration.md
       - Chat commands: reference/chat-commands.md
       - MCP server: reference/mcp-server.md
+      - Execution: reference/execution.md
       - Telemetry: reference/telemetry.md
-      - Claude token usage: reference/claude-usage.md
+      - Token usage: reference/token-usage.md
   - Developer guide:
       - Architecture: development/architecture.md
       - Set up the repository: development/setup.md
