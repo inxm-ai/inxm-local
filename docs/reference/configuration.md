@@ -16,11 +16,11 @@ The Settings view persists these `settings.json` fields:
 | `model` | Model identifier override; empty uses the backend default |
 | `api_key` | API key entered in the app; empty uses the backend environment variable |
 | `api_base` | Base URL for compatible or Vertex connections |
-| `executable` | Executable override for CLI-backed connections |
+| `executable` | Executable override for CLI-backed connections, or the agent CLI used by a Claude/OpenAI API connection |
 | `extra_executable_dirs` | Ordered absolute folders prepended to the process `PATH` at startup; defaults to `[]` |
 | `command_template` | Custom CLI command; `{{PROMPT}}` marks the prompt position |
 | `custom_cli_agentic` | Allows the experimental agent step for an explicitly agentic custom CLI |
-| `experimental_agent_calls` | Enables `AGENT_CALL` steps for supported account CLIs or agentic custom CLIs |
+| `experimental_agent_calls` | Enables `AGENT_CALL` steps for Claude/OpenAI API connections (through the matching CLI), supported account CLIs, or agentic custom CLIs |
 | `auto_mode` | Skips the guided design approval gate |
 | `max_tokens` | Maximum compiler output tokens; `0` uses the backend default |
 | `mcp_port` | Loopback MCP port; default `39387` |
@@ -50,8 +50,8 @@ Other fields control theme, update checks, onboarding state, and Codex sandbox b
 | `INXM_TELEMETRY_ENDPOINT` | Override the telemetry event endpoint |
 | `ANTHROPIC_API_KEY` | API-key fallback for Claude when the backend is automatic or API-backed |
 | `OPENAI_API_KEY` | API-key fallback for OpenAI when the backend is automatic or API-backed |
-| `INXM_CLAUDE_USAGE=off` | Disable local Anthropic Claude API usage recording and new token summaries for this process; `0`, `false`, and `no` also disable it |
-| `INXM_STORE_CLAUDE_PROMPTS=1` | Turn on direct Anthropic Claude API message storage for this process. See [Claude API token usage](claude-usage.md). |
+| `INXM_CLAUDE_USAGE=off` | Disable detailed Claude API recording and displays for this process; basic per-step counts remain available. `0`, `false`, and `no` also disable detailed tracking. See [Token usage](token-usage.md). |
+| `INXM_STORE_CLAUDE_PROMPTS=1` | Turn on direct Anthropic Claude API message storage for this process, only while detailed recording is enabled. See [Token usage](token-usage.md). |
 
 ## Tool environment
 

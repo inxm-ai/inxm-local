@@ -41,6 +41,10 @@ flowchart LR
 
 Desktop and MCP requests enter the shared engine paths. Compilation produces a validated saved plan. Execution resolves inputs, runs dependencies, writes step state, and emits progress. A failed run can be sent to the repair path, which proposes either a patch for explicit approval or an external problem to fix before resuming the same plan version.
 
+## Workflow workspace resolution
+
+Local code, agents, and tools share a selected project directory or a managed per-run workspace for file handoffs. The executor sets child-process directories without changing the application's working directory. See [Execution workspaces](../reference/execution.md#execution-workspaces) for resolution rules, adapter behavior, and resume safety.
+
 ## Trust boundaries
 
 The MCP server listens on loopback and rejects non-loopback Host or Origin headers. It is unauthenticated, so local processes with access to the loopback endpoint should be treated as trusted. Subprocess tools and experimental agent steps execute with the process permissions and should be allowlisted deliberately.
