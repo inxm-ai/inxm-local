@@ -313,8 +313,8 @@ pub fn bubble_frame(fill: Color32) -> egui::Frame {
 }
 
 /// Stroke for separators and panel boundaries: `ui.separator()`, the side- and
-/// bottom-panel separator lines, and the frame strokes of the nav sidebar and
-/// the chat workspace — those greys must be the same.
+/// bottom-panel separator lines (the nav sidebar's only divider), and the
+/// frame stroke of the chat workspace — those greys must be the same.
 ///
 /// This is also what `apply` installs as `widgets.noninteractive.bg_stroke`,
 /// because egui has no separate "separator stroke" knob; see
@@ -401,10 +401,10 @@ pub fn apply(ctx: &egui::Context, dark_mode: bool) {
     let radius = CornerRadius::same(RADIUS_WIDGET);
     visuals.widgets.noninteractive.bg_fill = disabled_bg();
     // This stroke is what `ui.separator()` and the side-panel separator
-    // lines are painted with. It must match `divider()` — the boundary the
-    // nav sidebar and the chat workspace draw via their frame strokes —
-    // or the app ends up with two different vertical divider grays next to
-    // each other ("the nav bar has a dark one").
+    // lines are painted with — including the nav sidebar's divider, which
+    // has no frame stroke of its own. It must match `divider()`, the frame
+    // stroke of the chat workspace, or the app ends up with two different
+    // vertical divider grays next to each other.
     //
     // It is *also* the frame stroke egui gives non-interactive widgets, so
     // read-only `TextEdit`s would inherit the divider grey here; they opt back
