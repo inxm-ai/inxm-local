@@ -70,6 +70,17 @@ pub async fn execute_tool(
     arguments: &IndexMap<String, serde_json::Value>,
     effective_step_timeout_secs: Option<u64>,
 ) -> Result<ToolOutput, ToolError> {
+    execute_tool_in_workspace(entry, arguments, effective_step_timeout_secs, None).await
+}
+
+/// Execute a workflow tool with a default workspace for local processes.
+/// Standalone tool calls and discovery retain their existing launch directory.
+pub async fn execute_tool_in_workspace(
+    entry: &ToolEntry,
+    arguments: &IndexMap<String, serde_json::Value>,
+    effective_step_timeout_secs: Option<u64>,
+    workspace: Option<&std::path::Path>,
+) -> Result<ToolOutput, ToolError> {
     let arguments_value =
         serde_json::to_value(arguments).map_err(|error| ToolError::Execution {
             tool: entry.name.clone(),
@@ -94,10 +105,26 @@ pub async fn execute_tool(
         let started = Instant::now();
         let result = match &entry.config {
             ToolConfig::Subprocess(config) => {
-                adapters::subprocess::run(config, arguments, timeout_secs).await
+                let mut config = config.clone();
+                if let Some(workspace) = workspace {
+                    config.working_dir = Some(
+                        config
+                            .working_dir
+                            .as_deref()
+                            .map_or_else(
+                                || workspace.to_path_buf(),
+                                |directory| workspace.join(directory),
+                            )
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                }
+                adapters::subprocess::run(&config, arguments, timeout_secs).await
             }
             ToolConfig::Http(config) => adapters::http::run(config, arguments, timeout_secs).await,
-            ToolConfig::Mcp(config) => adapters::mcp::run(config, arguments, timeout_secs).await,
+            ToolConfig::Mcp(config) => {
+                adapters::mcp::run_in_workspace(config, arguments, timeout_secs, workspace).await
+            }
         };
         let elapsed_ms = started.elapsed().as_millis() as u64;
         tracing::Span::current().record("tool.duration_ms", elapsed_ms);

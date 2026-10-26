@@ -60,12 +60,80 @@ pub struct StepContext {
     /// LLM connection and credentials for prompt and agent steps.
     pub llm_keys: crate::executor::LlmKeys,
     /// Root of the local data directory (default `.inxm/`), used to derive
-    /// a per-run scratch workspace for CODE_CALL steps whose optional
+    /// a shared per-run workspace for local steps whose optional
     /// `root_directory` input was not supplied at runtime.
     pub storage_root: std::path::PathBuf,
+    pub(crate) workspace: Option<Arc<super::workspace::RunWorkspace>>,
     /// Executor-local transcript buffer used to persist partial output when
     /// an agent exits unsuccessfully or is killed by a timeout.
     pub(crate) agent_audit: Arc<std::sync::Mutex<(String, String)>>,
+}
+
+impl StepContext {
+    pub(crate) fn workspace_dir(&self) -> Result<std::path::PathBuf, crate::error::ExecutorError> {
+        let prepare = || match &self.workspace {
+            Some(workspace) => workspace.prepare(),
+            None => super::workspace::RunWorkspace::resolve(
+                &self.plan.config,
+                &self.storage_root,
+                &self.run_id,
+            )?
+            .prepare(),
+        };
+        prepare().map_err(|error| crate::error::ExecutorError::StepFailed {
+            step_id: self.step.id.clone(),
+            message: format!("failed to prepare run workspace: {error}"),
+        })
+    }
+
+    pub(crate) fn working_directory(
+        &self,
+        template: Option<&str>,
+    ) -> Result<std::path::PathBuf, crate::error::ExecutorError> {
+        let root = self.workspace_dir()?;
+        let mut config = self.plan.config.clone();
+        config.insert(
+            format!("input.{}", crate::plan::types::ROOT_DIRECTORY_INPUT),
+            serde_json::Value::String(root.to_string_lossy().into_owned()),
+        );
+        let directory = match template {
+            Some(value) => match resolve_placeholders(
+                &serde_json::Value::String(value.to_owned()),
+                &config,
+                &self.step_outputs,
+            ) {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(value) if value.is_empty() => None,
+                serde_json::Value::String(value) => Some(value),
+                _ => {
+                    return Err(crate::error::ExecutorError::StepFailed {
+                        step_id: self.step.id.clone(),
+                        message: "working directory must resolve to a directory path or null"
+                            .to_owned(),
+                    });
+                }
+            },
+            None => None,
+        };
+        let path = directory.map_or_else(|| root.clone(), |directory| root.join(directory));
+        if !path.is_dir() {
+            return Err(crate::error::ExecutorError::StepFailed {
+                step_id: self.step.id.clone(),
+                message: format!(
+                    "working directory '{}' does not exist or is not a directory",
+                    path.display()
+                ),
+            });
+        }
+        path.canonicalize()
+            .map_err(|error| crate::error::ExecutorError::StepFailed {
+                step_id: self.step.id.clone(),
+                message: format!(
+                    "cannot resolve working directory '{}': {error}",
+                    path.display()
+                ),
+            })
+    }
 }
 
 type NamedOutputs = IndexMap<String, serde_json::Value>;
@@ -558,23 +626,6 @@ pub(super) fn resolve_to_string(value: &str, ctx: &StepContext) -> String {
     ) {
         serde_json::Value::String(resolved) => resolved,
         other => other.to_string(),
-    }
-}
-
-/// Like [`resolve_to_string`], but a value that resolves entirely to JSON
-/// `null` becomes `None` instead of the string `"null"`. Use this for
-/// optional fields (e.g. a CODE_CALL `working_dir` of
-/// `"${input.root_directory}"` with no input supplied) where "unset" must
-/// fall through to the caller's default rather than become a bogus literal.
-pub(super) fn resolve_to_optional_string(value: &str, ctx: &StepContext) -> Option<String> {
-    match resolve_placeholders(
-        &serde_json::Value::String(value.to_owned()),
-        &ctx.plan.config,
-        &ctx.step_outputs,
-    ) {
-        serde_json::Value::Null => None,
-        serde_json::Value::String(resolved) => Some(resolved),
-        other => Some(other.to_string()),
     }
 }
 

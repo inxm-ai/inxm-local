@@ -7,15 +7,14 @@ use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
-/// The well-known plan input name that carries the working directory for
-/// every command-executing step (CODE_CALL and AGENT_CALL). Plans that run
-/// commands must declare this input — see [`Plan::requires_root_directory`]
-/// and the root-directory check in `validator`. CODE_CALL plans may declare it
+/// The well-known plan input name that carries the run workspace root.
+/// Plans containing CODE_CALL or AGENT_CALL must declare this input —
+/// see [`Plan::requires_root_directory`]
+/// and the root-directory check in `validator`. Plans may declare it
 /// as `required: false` with no/null default (the executor then falls back to
-/// an app-managed per-run scratch workspace). AGENT_CALL plans require an
-/// explicit caller-supplied directory because agents can make arbitrary
-/// workspace changes. The plan IR itself treats both shapes as ordinary
-/// optional/required inputs; the validator enforces the step-specific rule.
+/// an app-managed per-run workspace shared by code, agents, and local tools).
+/// Workflows that depend on existing user files require a caller-supplied
+/// directory instead.
 pub const ROOT_DIRECTORY_INPUT: &str = "root_directory";
 
 // ─── Step types ───────────────────────────────────────────────────────────────
@@ -108,7 +107,7 @@ pub struct PromptCallConfig {
 ///
 /// Unlike a bounded prompt completion or a fixed script, an agent call runs a
 /// tool-using coding agent in a real workspace. `working_dir` is deliberately
-/// required in the serialized form: it must resolve from the plan's required
+/// required in the serialized form: it must resolve from the plan's declared
 /// [`ROOT_DIRECTORY_INPUT`] so an agent is never launched in an implicit
 /// process directory. The validator enforces that reference relationship.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
