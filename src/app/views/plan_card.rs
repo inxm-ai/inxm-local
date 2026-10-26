@@ -43,9 +43,11 @@ pub struct RunBinding {
     /// Recorded Claude API calls per step, across attempts and iterations.
     #[serde(default)]
     pub claude_calls: HashMap<String, Vec<crate::storage::llm_usage::ClaudeCallSummary>>,
-    /// Aggregate token count reported by non-Claude providers.
+    /// Basic aggregate token count across providers and CLIs.
     #[serde(default)]
     pub token_usage_total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) combined_token_usage: Option<crate::app::usage::RunTokenUsage>,
     /// Current live position of each running FAN_OUT step.
     #[serde(skip)]
     pub fan_out_progress: HashMap<String, FanOutProgress>,
@@ -56,6 +58,73 @@ pub struct RunBinding {
 impl RunBinding {
     pub fn is_active(&self) -> bool {
         self.finished.is_none()
+    }
+
+    fn token_totals(&self, show_claude_usage: bool) -> (Option<u64>, u64) {
+        if show_claude_usage {
+            if let Some(summary) = &self.combined_token_usage {
+                return summary.totals();
+            }
+            let claude = TokenTotals::from_summaries(self.claude_calls.values().flatten());
+            if !claude.is_empty() {
+                return (Some(claude.total), claude.unknown_calls);
+            }
+        }
+        (self.token_usage_total, 0)
+    }
+}
+
+#[cfg(test)]
+mod token_usage_tests {
+    use super::*;
+    use crate::storage::runs::{Run, StepRun, TokenUsage};
+
+    #[test]
+    fn saved_binding_keeps_mixed_totals_and_basic_counts_independent_of_the_toggle() {
+        let mut run = Run::new("plan", 1);
+        let mut prompt = StepRun::new("prompt");
+        prompt.token_usage = Some(TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+        });
+        prompt.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "prompt-call".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 20
+            })),
+        }];
+        let mut agent = StepRun::new("agent");
+        agent.token_usage = Some(TokenUsage {
+            input_tokens: 800,
+            output_tokens: 200,
+        });
+        run.step_runs.insert("prompt".to_owned(), prompt);
+        run.step_runs.insert("agent".to_owned(), agent);
+        let binding = crate::app::views::chat::binding_from_run(&run);
+        let saved = serde_json::to_string(&binding).unwrap();
+        let loaded: RunBinding = serde_json::from_str(&saved).unwrap();
+
+        assert_eq!(loaded.token_totals(true), (Some(1120), 0));
+        assert_eq!(loaded.token_totals(false), (Some(1120), 0));
+    }
+
+    #[test]
+    fn basic_only_and_legacy_bindings_keep_their_reported_totals() {
+        let binding = RunBinding {
+            token_usage_total: Some(1000),
+            ..RunBinding::default()
+        };
+        for show_claude_usage in [false, true] {
+            assert_eq!(binding.token_totals(show_claude_usage), (Some(1000), 0));
+            assert_eq!(
+                RunBinding::default().token_totals(show_claude_usage),
+                (None, 0)
+            );
+        }
     }
 }
 
@@ -375,36 +444,26 @@ fn show_expanded_workspace(
                             ui.separator();
                             steps_graph(ui, card_id.with("graph"), plan, run, show_claude_usage);
                             ui.add_space(12.0);
-                            if show_claude_usage && let Some(binding) = run {
-                                let has_recorded_usage = binding.token_usage_total.is_some()
-                                    || binding
-                                        .claude_calls
-                                        .values()
-                                        .any(|calls| !calls.is_empty());
+                            if let Some(binding) = run {
+                                let (tokens_spent, unknown_calls) =
+                                    binding.token_totals(show_claude_usage);
+                                let has_recorded_usage = tokens_spent.is_some();
                                 let has_ai_step = plan.steps.iter().any(|step| {
                                     matches!(
                                         step.step_type(),
                                         StepType::PromptCall | StepType::AgentCall
                                     )
                                 });
-                                let claude_totals = TokenTotals::from_summaries(
-                                    binding.claude_calls.values().flatten(),
-                                );
-                                let tokens_spent = if claude_totals.calls > 0 {
-                                    claude_totals.total
-                                } else {
-                                    binding.token_usage_total.unwrap_or(0)
-                                };
                                 ui.separator();
-                                if tokens_spent == 0 && claude_totals.unknown_calls == 0 {
+                                if tokens_spent.unwrap_or(0) == 0 && unknown_calls == 0 {
                                     let (message, hint) = if !has_recorded_usage && has_ai_step {
                                         (
-                                            "No Claude token usage was reported for this run.",
+                                            "No token usage was reported for this run.",
                                             "This plan includes an AI-backed step, but no provider usage was recorded, so zero spend cannot be confirmed.",
                                         )
                                     } else if has_recorded_usage {
                                         (
-                                            "No Claude tokens were spent on this run.",
+                                            "No tokens were spent on this run.",
                                             "The provider reported no billable token usage for this run.",
                                         )
                                     } else {
@@ -420,9 +479,9 @@ fn show_expanded_workspace(
                                     )
                                     .on_hover_text(hint);
                                 } else {
-                                    let token_usage = crate::app::usage::run_tokens_label(
-                                        binding.claude_calls.values().flatten(),
-                                        binding.token_usage_total,
+                                    let token_usage = crate::app::usage::token_count_label(
+                                        tokens_spent.unwrap_or(0),
+                                        unknown_calls,
                                     );
                                     ui.label(
                                         RichText::new(token_usage)

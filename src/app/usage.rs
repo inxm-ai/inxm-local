@@ -12,6 +12,7 @@ use crate::storage::llm_usage::{
     ClaudeCallSummary, CreationPhase, PlanCreationLink, SupportKind, TokenTotals, UsageContext,
     UsageOrigin,
 };
+use crate::storage::runs::{Run, TokenUsage};
 use std::sync::{Arc, Mutex};
 
 /// Phase labels `compile_validate_normalize` sets before its retries.
@@ -296,6 +297,91 @@ pub(crate) fn run_totals_text(totals: &TokenTotals) -> String {
     )
 }
 
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RunTokenUsage {
+    claude: TokenTotals,
+    additional: TokenUsage,
+    additional_steps: u32,
+}
+
+impl RunTokenUsage {
+    pub(crate) fn from_run(run: &Run, show_claude_usage: bool) -> Self {
+        let mut summary = Self {
+            claude: if show_claude_usage {
+                run.claude_totals()
+            } else {
+                TokenTotals::default()
+            },
+            ..Self::default()
+        };
+        for step in run.step_runs.values() {
+            if step.iterations.is_empty() {
+                if !show_claude_usage || step.claude_calls.is_empty() {
+                    summary.add_basic(step.token_usage);
+                }
+            } else {
+                for iteration in &step.iterations {
+                    if !show_claude_usage
+                        || !step
+                            .claude_calls
+                            .iter()
+                            .any(|call| call.iteration == Some(iteration.iteration))
+                    {
+                        summary.add_basic(iteration.token_usage);
+                    }
+                }
+            }
+        }
+        summary
+    }
+
+    fn add_basic(&mut self, usage: Option<TokenUsage>) {
+        if let Some(usage) = usage {
+            self.additional.add(usage);
+            self.additional_steps += 1;
+        }
+    }
+
+    pub(crate) fn totals(&self) -> (Option<u64>, u64) {
+        let reported = !self.claude.is_empty() || self.additional_steps > 0;
+        (
+            reported.then(|| self.claude.total + self.additional.total()),
+            self.claude.unknown_calls,
+        )
+    }
+
+    pub(crate) fn text(&self) -> Option<String> {
+        if self.claude.is_empty() {
+            return (self.additional_steps > 0).then(|| {
+                let step_word = if self.additional_steps == 1 {
+                    "AI step"
+                } else {
+                    "AI steps"
+                };
+                format!(
+                    "Tokens: {} {step_word} — {} in / {} out ({} total).",
+                    self.additional_steps,
+                    self.additional.input_tokens,
+                    self.additional.output_tokens,
+                    self.additional.total(),
+                )
+            });
+        }
+        if self.additional_steps == 0 {
+            return Some(run_totals_text(&self.claude));
+        }
+        Some(format!(
+            "Tokens: {} + {} — {} in / {} out ({} total){}.",
+            count_text(self.claude.calls, "Claude API call"),
+            count_text(u64::from(self.additional_steps), "AI step"),
+            thousands(self.claude.total_input() + self.additional.input_tokens),
+            thousands(self.claude.output + self.additional.output_tokens),
+            thousands(self.claude.total + self.additional.total()),
+            unknown_suffix(&self.claude),
+        ))
+    }
+}
+
 pub(crate) fn creation_usage_label(totals: &TokenTotals) -> Option<String> {
     if totals.is_empty() {
         return None;
@@ -307,16 +393,9 @@ pub(crate) fn creation_usage_label(totals: &TokenTotals) -> Option<String> {
     ))
 }
 
-pub(crate) fn run_tokens_label<'a>(
-    calls: impl IntoIterator<Item = &'a ClaudeCallSummary>,
-    fallback_total: Option<u64>,
-) -> String {
-    let totals = TokenTotals::from_summaries(calls);
-    if totals.calls == 0 {
-        return format!("{} tokens", thousands(fallback_total.unwrap_or(0)));
-    }
-    let unknown = if totals.unknown_calls > 0 { "+" } else { "" };
-    format!("{}{unknown} tokens", thousands(totals.total))
+pub(crate) fn token_count_label(total: u64, unknown_calls: u64) -> String {
+    let unknown = if unknown_calls > 0 { "+" } else { "" };
+    format!("{}{unknown} tokens", thousands(total))
 }
 
 /// Compact per-step label shown next to the step duration.
@@ -325,8 +404,7 @@ pub(crate) fn step_tokens_label(calls: &[ClaudeCallSummary]) -> Option<String> {
         return None;
     }
     let totals = TokenTotals::from_summaries(calls);
-    let unknown = if totals.unknown_calls > 0 { "+" } else { "" };
-    Some(format!("{}{unknown} tokens", thousands(totals.total)))
+    Some(token_count_label(totals.total, totals.unknown_calls))
 }
 
 /// One line per recorded call for the step detail view.
@@ -695,11 +773,114 @@ mod tests {
     }
 
     #[test]
-    fn run_tokens_label_aggregates_calls_and_flags_unknown_usage() {
-        let calls = [summary(1, None, Some((100, 10))), summary(2, None, None)];
-        assert_eq!(run_tokens_label(calls.iter(), None), "1,110+ tokens");
-        assert_eq!(run_tokens_label([].iter(), None), "0 tokens");
-        assert_eq!(run_tokens_label([].iter(), Some(235)), "235 tokens");
+    fn token_count_label_flags_unknown_usage() {
+        assert_eq!(token_count_label(1110, 1), "1,110+ tokens");
+        assert_eq!(token_count_label(0, 0), "0 tokens");
+        assert_eq!(token_count_label(235, 0), "235 tokens");
+    }
+
+    #[test]
+    fn run_totals_combine_api_retries_archived_calls_and_basic_agent_usage() {
+        use crate::storage::runs::StepRun;
+
+        let mut run = Run::new("plan", 1);
+        let mut prompt = StepRun::new("prompt");
+        prompt.token_usage = Some(TokenUsage {
+            input_tokens: 1100,
+            output_tokens: 10,
+        });
+        prompt.claude_calls = vec![
+            summary(1, None, Some((100, 10))),
+            summary(2, None, Some((100, 10))),
+        ];
+        run.step_runs.insert("prompt".to_owned(), prompt);
+        let mut agent = StepRun::new("agent");
+        agent.token_usage = Some(TokenUsage {
+            input_tokens: 800,
+            output_tokens: 200,
+        });
+        run.step_runs.insert("agent".to_owned(), agent);
+        run.archived_claude_calls
+            .insert("agent".to_owned(), vec![summary(1, None, Some((50, 5)))]);
+
+        let detailed = RunTokenUsage::from_run(&run, true);
+        assert_eq!(detailed.totals(), (Some(4275), 0));
+        assert_eq!(
+            detailed.text().as_deref(),
+            Some("Tokens: 3 Claude API calls + 1 AI step — 4,050 in / 225 out (4,275 total).")
+        );
+        let basic = RunTokenUsage::from_run(&run, false);
+        assert_eq!(basic.totals(), (Some(2110), 0));
+        assert_eq!(
+            basic.text().as_deref(),
+            Some("Tokens: 2 AI steps — 1900 in / 210 out (2110 total).")
+        );
+    }
+
+    #[test]
+    fn run_totals_use_basic_usage_only_for_unrecorded_fan_out_iterations() {
+        use crate::storage::runs::{StepRun, StepRunIteration, StepRunStatus};
+
+        let mut run = Run::new("plan", 1);
+        let mut child = StepRun::new("child");
+        child.token_usage = Some(TokenUsage {
+            input_tokens: 9999,
+            output_tokens: 9999,
+        });
+        for iteration in 0..3 {
+            child.iterations.push(StepRunIteration {
+                iteration,
+                status: StepRunStatus::Succeeded,
+                started_at: chrono::Utc::now(),
+                finished_at: chrono::Utc::now(),
+                duration_ms: 1,
+                outputs: Default::default(),
+                stdout: None,
+                stderr: None,
+                error: None,
+                token_usage: Some(TokenUsage {
+                    input_tokens: 1100,
+                    output_tokens: 10,
+                }),
+            });
+        }
+        child.claude_calls = vec![summary(1, Some(0), Some((100, 10)))];
+        run.step_runs.insert("child".to_owned(), child);
+        run.archived_claude_calls
+            .insert("removed".to_owned(), vec![summary(1, None, None)]);
+
+        let detailed = RunTokenUsage::from_run(&run, true);
+        assert_eq!(detailed.totals(), (Some(3330), 1));
+        assert_eq!(
+            detailed.text().as_deref(),
+            Some(
+                "Tokens: 2 Claude API calls + 2 AI steps — 3,300 in / 30 out (3,330 total), +1 call with unknown usage."
+            )
+        );
+        assert_eq!(
+            RunTokenUsage::from_run(&run, false).totals(),
+            (Some(3330), 0)
+        );
+    }
+
+    #[test]
+    fn run_totals_distinguish_missing_usage_reported_zero_and_unknown_calls() {
+        use crate::storage::runs::StepRun;
+
+        let mut run = Run::new("plan", 1);
+        let empty = RunTokenUsage::from_run(&run, true);
+        assert_eq!(empty.totals(), (None, 0));
+        assert_eq!(empty.text(), None);
+
+        let mut step = StepRun::new("agent");
+        step.token_usage = Some(TokenUsage::default());
+        run.step_runs.insert("agent".to_owned(), step);
+        assert_eq!(RunTokenUsage::from_run(&run, true).totals(), (Some(0), 0));
+
+        run.step_runs["agent"].claude_calls = vec![summary(1, None, None)];
+        let unknown = RunTokenUsage::from_run(&run, true);
+        assert_eq!(unknown.totals(), (Some(0), 1));
+        assert!(unknown.text().unwrap().contains("unknown usage"));
     }
 
     #[test]
