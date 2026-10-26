@@ -316,19 +316,6 @@ fn validate_root_directory_input(plan: &Plan) -> Vec<ValidationError> {
             ),
         ));
     }
-    let has_agent_call = plan
-        .steps
-        .iter()
-        .any(|step| matches!(step.config, StepConfig::AgentCall(_)));
-    if has_agent_call && !input.required {
-        errors.push(ValidationError::plan(
-            ValidationErrorKind::MissingRootDirectoryInput,
-            format!(
-                "plan input '{}' must be required when the plan contains an AGENT_CALL step",
-                crate::plan::types::ROOT_DIRECTORY_INPUT
-            ),
-        ));
-    }
     for step in &plan.steps {
         let (kind, working_dir, permits_implicit_workspace) = match &step.config {
             StepConfig::CodeCall(config) => ("CODE_CALL", config.working_dir.as_deref(), true),
@@ -1304,7 +1291,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_call_requires_root_directory_input_to_be_required() {
+    fn agent_call_allows_optional_root_directory_for_managed_workspaces() {
         let mut root = required_root_directory_input();
         root.required = false;
         let plan = Plan {
@@ -1320,11 +1307,7 @@ mod tests {
             outputs: vec![],
         };
         let errors = validate_root_directory_input(&plan);
-        assert!(
-            errors
-                .iter()
-                .any(|error| error.message.contains("must be required"))
-        );
+        assert!(errors.is_empty(), "{errors:?}");
     }
 
     #[test]

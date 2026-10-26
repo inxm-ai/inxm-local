@@ -24,7 +24,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
-use super::{StepContext, StepResult, non_empty, resolve_to_optional_string, resolve_to_string};
+use super::{StepContext, StepResult, non_empty, resolve_to_string};
 
 const POWERSHELL_UTF8_WRAPPER: &str = r#"param(
     [Parameter(Mandatory = $true)][string]$InxmScriptPath,
@@ -133,50 +133,7 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         .stdin
         .as_deref()
         .map(|value| resolve_to_string(value, ctx));
-    // A step's own `working_dir` wins when set; otherwise fall back to the
-    // plan-wide `root_directory` input. That input may now be `required:
-    // false` with no value supplied at runtime — in that case there is no
-    // user-provided path to fall back to, so the step runs in a managed
-    // per-run scratch workspace instead of the app's cwd (never leave the
-    // working directory undefined).
-    let root_directory_value = ctx
-        .plan
-        .config
-        .get(&format!(
-            "input.{}",
-            crate::plan::types::ROOT_DIRECTORY_INPUT
-        ))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned);
-
-    let resolved_working_dir = match cfg
-        .working_dir
-        .as_deref()
-        .and_then(|value| resolve_to_optional_string(value, ctx))
-        .filter(|value| !value.is_empty())
-        .or(root_directory_value)
-    {
-        Some(dir) => dir,
-        None => scratch_workspace_dir(ctx)
-            .map_err(|e| ExecutorError::StepFailed {
-                step_id: ctx.step.id.clone(),
-                message: format!("failed to prepare scratch workspace: {e}"),
-            })?
-            .to_string_lossy()
-            .into_owned(),
-    };
-    // Spawning with a missing cwd yields the same ENOENT as a missing
-    // interpreter, which reads as "bash not found" — catch it here instead.
-    if !std::path::Path::new(&resolved_working_dir).is_dir() {
-        return Err(ExecutorError::StepFailed {
-            step_id: ctx.step.id.clone(),
-            message: format!(
-                "working directory '{resolved_working_dir}' does not exist — \
-                 supply a valid `root_directory` input or fix the step's `working_dir`"
-            ),
-        });
-    }
+    let resolved_working_dir = ctx.working_directory(cfg.working_dir.as_deref())?;
 
     let timeout_secs = match (cfg.timeout_secs, ctx.global_timeout_secs) {
         (Some(code_call_timeout), Some(step_timeout)) => Some(code_call_timeout.min(step_timeout)),
@@ -1071,21 +1028,6 @@ impl Drop for TempScript {
     }
 }
 
-/// Per-run scratch workspace for a CODE_CALL step whose `root_directory`
-/// input is optional and was not supplied at runtime: `.inxm/runs/<run-id>/workspace`
-/// under the app's managed data directory (`ctx.storage_root`). Created
-/// (idempotently) before the step runs, and isolated per run id so
-/// concurrent/repeated runs never share a cwd.
-fn scratch_workspace_dir(ctx: &StepContext) -> std::io::Result<PathBuf> {
-    let dir = ctx
-        .storage_root
-        .join("runs")
-        .join(&ctx.run_id)
-        .join("workspace");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1131,6 +1073,7 @@ mod scratch_workspace_tests {
             child_progress: None,
             llm_keys: Default::default(),
             storage_root,
+            workspace: None,
             agent_audit: Default::default(),
         }
     }
@@ -1500,6 +1443,7 @@ mod output_mapping_tests {
                 "inxm_test_storage_{}",
                 uuid::Uuid::new_v4().as_simple()
             )),
+            workspace: None,
             agent_audit: Default::default(),
         }
     }

@@ -235,6 +235,7 @@ mod tests {
             child_progress: None,
             llm_keys: Default::default(),
             storage_root: std::env::temp_dir(),
+            workspace: None,
             agent_audit: Default::default(),
         }
     }

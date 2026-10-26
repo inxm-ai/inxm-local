@@ -13,6 +13,7 @@
 pub mod dag;
 pub mod step_runners;
 mod usage;
+mod workspace;
 
 pub use crate::storage::runs::{Run, RunStatus, StepRun, StepRunIteration, StepRunStatus};
 
@@ -317,6 +318,18 @@ pub async fn resume_from_repair(
     // validates any submitted repair overrides.
     let reset_step_ids = repair_reset_step_ids(&plan, &run, &failed_step_id);
     let inputs = rebase_repair_inputs(&plan, &run, &input_overrides, &reset_step_ids)?;
+    let root_directory = crate::plan::types::ROOT_DIRECTORY_INPUT;
+    if inputs.get(root_directory) != run.inputs.get(root_directory)
+        && let Some(step) = plan.steps.iter().find(|step| {
+            workspace::step_uses_workspace(step, &config.catalog)
+                && step_has_persisted_success(&run, &step.id, &reset_step_ids)
+        })
+    {
+        return Err(invalid_resume(format!(
+            "input '{root_directory}' cannot change because succeeded step '{}' used the original run workspace; start a new run to use a different directory",
+            step.id
+        )));
+    }
     run.inputs = inputs;
     inject_runtime_inputs(&mut plan, &run.inputs);
 
@@ -472,10 +485,19 @@ fn step_has_persisted_success(run: &Run, step_id: &str, reset_step_ids: &HashSet
     )
 )]
 async fn execute_run(
-    plan: Plan,
+    mut plan: Plan,
     config: ExecutorConfig,
     mut run: Run,
 ) -> Result<Run, ExecutorError> {
+    let workspace = std::sync::Arc::new(workspace::RunWorkspace::resolve(
+        &plan.config,
+        config.storage.root_path(),
+        &run.id,
+    )?);
+    plan.config.insert(
+        format!("input.{}", crate::plan::types::ROOT_DIRECTORY_INPUT),
+        serde_json::Value::String(workspace.root.to_string_lossy().into_owned()),
+    );
     // Shared read-only from here on; step contexts clone the Arc, not the plan.
     let plan = std::sync::Arc::new(plan);
     run.status = RunStatus::Running;
@@ -583,6 +605,7 @@ async fn execute_run(
             child_progress: None,
             llm_keys: config.llm_keys.clone(),
             storage_root: config.storage.root_path().to_path_buf(),
+            workspace: Some(workspace.clone()),
             agent_audit: Default::default(),
         };
 

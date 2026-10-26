@@ -143,9 +143,20 @@ pub async fn run(
     arguments: &IndexMap<String, serde_json::Value>,
     timeout_secs: Option<u64>,
 ) -> Result<ToolOutput, ToolError> {
+    run_in_workspace(config, arguments, timeout_secs, None).await
+}
+
+pub async fn run_in_workspace(
+    config: &McpConfig,
+    arguments: &IndexMap<String, serde_json::Value>,
+    timeout_secs: Option<u64>,
+    workspace: Option<&std::path::Path>,
+) -> Result<ToolOutput, ToolError> {
     let effective_timeout_secs = timeout_secs.unwrap_or(DEFAULT_MCP_TIMEOUT_SECS);
     match &config.transport {
-        McpTransport::Stdio { .. } => call_tool(config, arguments, effective_timeout_secs).await,
+        McpTransport::Stdio { .. } => {
+            call_tool(config, arguments, effective_timeout_secs, workspace).await
+        }
         McpTransport::StreamableHttp { endpoint, auth } => {
             super::mcp_http::run(
                 endpoint,
@@ -177,6 +188,7 @@ pub async fn list_tools(
                 server_command,
                 server_args,
                 server_env,
+                None,
                 effective_timeout_secs,
                 LIST_TOOLS_LABEL,
                 |stdin, stdout| Box::pin(list_session(stdin, stdout)),
@@ -195,6 +207,7 @@ async fn call_tool(
     config: &McpConfig,
     arguments: &IndexMap<String, serde_json::Value>,
     timeout_secs: u64,
+    workspace: Option<&std::path::Path>,
 ) -> Result<ToolOutput, ToolError> {
     let McpTransport::Stdio {
         server_command,
@@ -217,6 +230,7 @@ async fn call_tool(
         server_command,
         server_args,
         server_env,
+        workspace,
         timeout_secs,
         &tool_label,
         move |stdin, stdout| {
@@ -237,6 +251,7 @@ async fn run_stdio_session<T>(
     server_command: &str,
     server_args: &[String],
     server_env: &IndexMap<String, String>,
+    workspace: Option<&std::path::Path>,
     timeout_secs: u64,
     tool_label: &str,
     session: impl for<'a> FnOnce(
@@ -248,12 +263,15 @@ async fn run_stdio_session<T>(
     let mut command = Command::new(crate::tools::adapters::process::resolve_command(
         server_command,
         server_env,
-        None,
+        workspace,
         tool_label,
     )?);
     // A shebang such as `#!/usr/bin/env node` searches the child's PATH; Server env still wins.
     if let Some(path) = crate::hostenv::augmented_path() {
         command.env("PATH", path);
+    }
+    if let Some(workspace) = workspace {
+        command.current_dir(workspace);
     }
     command
         .args(server_args)

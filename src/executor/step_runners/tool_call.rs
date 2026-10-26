@@ -53,7 +53,22 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         runner_tool = %cfg.tool,
         "external runner started"
     );
-    let output = match tools::execute_tool(entry, &resolved_args, ctx.global_timeout_secs).await {
+    let workspace = match &entry.config {
+        tools::catalog::ToolConfig::Subprocess(_)
+        | tools::catalog::ToolConfig::Mcp(tools::catalog::McpConfig {
+            transport: tools::catalog::McpTransport::Stdio { .. },
+            ..
+        }) => Some(ctx.workspace_dir()?),
+        _ => None,
+    };
+    let output = match tools::execute_tool_in_workspace(
+        entry,
+        &resolved_args,
+        ctx.global_timeout_secs,
+        workspace.as_deref(),
+    )
+    .await
+    {
         Ok(output) => output,
         Err(error) => {
             tracing::warn!(

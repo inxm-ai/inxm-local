@@ -208,12 +208,14 @@ Any plan containing a CODE_CALL step MUST declare a plan input named exactly
   didn't need is a minor extra prompt, while silently running project
   commands against an empty scratch directory produces confusing, wrong
   results with no error.
-- When the workflow actually reads or writes user files/directories, emit
+- When the workflow depends on existing user files/directories, emit
   `"required": true` so the caller must provide the working directory explicitly.
-- When the CODE_CALL does not access the filesystem (e.g., string formatting, JSON
-  munging, or an inline calculation), emit `"required": false` so the runtime uses
-  a managed per-run scratch workspace. This keeps scripts isolated without forcing
-  the user to supply a path for workflows that don't need it.
+- When the CODE_CALL only processes supplied data or creates new intermediate files
+  and artifacts, emit `"required": false` so the runtime uses a managed per-run
+  workspace shared with agents and local tools. This also covers scripts with no
+  filesystem access (e.g., string formatting, JSON munging, or an inline calculation).
+  A user-requested export destination is a separate explicit path, not a reason to
+  require an existing project directory for intermediate files.
 - The `root_directory` input must always exist in CODE_CALL plans (it stays
   user-overridable). Set every CODE_CALL step's `working_dir` to
   `"${input.root_directory}"`, or to a path built from it (for example
@@ -424,8 +426,26 @@ const AGENT_CALL_CONFIG_SHAPE: &str = r#"
 `objective` states the outcome and success criteria, not a shell command.
 `working_dir` is required and MUST be exactly `${input.root_directory}` or a
 path derived from it. Every AGENT_CALL plan MUST declare `root_directory` as a
-required string input with no default. `timeout_secs`, when present, must be
-greater than zero.
+string input with `"default": null`. Set `"required": true` when the task needs
+an existing repository or user files. Set `"required": false` when the task
+only creates new artifacts or processes supplied data; the runtime provides
+an isolated per-run workspace. `timeout_secs`, when present, must be greater
+than zero.
+
+The run workspace is shared by agent steps, code steps, and local tools with
+no explicit working directory. Relative file paths refer to this workspace,
+not INXM's data directory or launch directory. Keep intermediate files there;
+use an explicit destination only when the user requests an export. Absolute
+MCP filesystem allowlists remain enforced; do not assume a tool can access
+the workspace when its configuration restricts it to another directory.
+
+An agent receives only its resolved objective, not chat history or preceding
+step results automatically. `depends_on` controls ordering, not data transfer.
+Include required input and prior-step placeholders directly in the objective
+(for example `${input.joke_style}` and `${step.fetch_joke.joke_data}`), or
+pass explicit paths to files written by preceding steps in the workspace.
+When the agent must produce a file, add a deterministic downstream step that
+checks or reads that file; a successful CLI exit does not prove it was created.
 
 AGENT_CALL launches a real tool-using coding CLI with workspace-write access.
 It may run arbitrary commands and write arbitrary files. Its complete process
@@ -729,7 +749,7 @@ pub fn build_compile_user_prompt(req: &CompileRequest) -> String {
     {
         out.push_str(
             "AGENT_CALL is experimentally enabled for this request. It has real side effects: \
-             the agent may run arbitrary commands and write arbitrary files under the required \
+             the agent may run arbitrary commands and write arbitrary files under the resolved \
              root_directory workspace, and its full transcript is retained for audit. Use it \
              only under the decision rule in the system instructions.\n\n",
         );
@@ -1863,12 +1883,12 @@ mod tests {
         // Verify the updated instruction about conditional required/optional
         assert!(
             prompt.contains("`\"required\": true`")
-                && prompt.contains("reads or writes user files"),
-            "compile prompt must instruct model to emit required:true only when workflow reads/writes files"
+                && prompt.contains("depends on existing user files"),
+            "compile prompt must require a root when the workflow depends on existing user files"
         );
         assert!(
             prompt.contains("`\"required\": false`"),
-            "compile prompt must allow required:false for non-filesystem CODE_CALLs"
+            "compile prompt must allow required:false for location-independent CODE_CALLs"
         );
         assert!(
             prompt.contains("empty scratch directory")
@@ -1879,16 +1899,18 @@ mod tests {
              project, not just whether it literally calls a filesystem API"
         );
         assert!(
-            prompt.contains("managed per-run scratch workspace"),
-            "compile prompt missing mention of managed scratch workspace"
+            prompt.contains("workspace shared with agents and local tools")
+                && prompt
+                    .contains("only processes supplied data or creates new intermediate files"),
+            "compile prompt must allow managed workspaces for generated artifacts"
         );
         assert!(
             prompt.contains("string formatting"),
             "compile prompt missing example of non-filesystem CODE_CALL"
         );
         assert!(
-            prompt.contains("does not access the filesystem"),
-            "compile prompt must describe when root_directory can be optional"
+            prompt.contains("no\n  filesystem access"),
+            "compile prompt must also allow an optional root for scripts without filesystem access"
         );
     }
 
@@ -1985,7 +2007,11 @@ mod tests {
             "\"objective\"",
             "\"working_dir\": \"${input.root_directory}\"",
             "\"timeout_secs\"",
-            "required string input",
+            "string input with `\"default\": null`",
+            "isolated per-run workspace",
+            "`depends_on` controls ordering, not data transfer",
+            "not INXM's data directory or launch directory",
+            "a successful CLI exit does not prove it was created",
             "workspace-write access",
             "arbitrary commands and write arbitrary files",
             "complete process\ntranscript is retained for audit",

@@ -11,7 +11,7 @@ use crate::llm::{CUSTOM_CLI_PROMPT_PLACEHOLDER, LlmProtocol};
 use crate::plan::types::StepConfig;
 use crate::storage::runs::TokenUsage;
 use indexmap::IndexMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,6 +23,12 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
         StepConfig::AgentCall(cfg) => cfg,
         _ => unreachable!("agent_call runner called for non-AGENT_CALL step"),
     };
+    if cfg.working_dir.trim().is_empty() {
+        return Err(failure(
+            ctx,
+            "agent working directory must reference the run workspace",
+        ));
+    }
     let objective = resolve_placeholders(
         &serde_json::Value::String(cfg.objective.clone()),
         &ctx.plan.config,
@@ -31,15 +37,7 @@ pub async fn run(ctx: &StepContext) -> Result<StepResult, ExecutorError> {
     .as_str()
     .unwrap_or_default()
     .to_owned();
-    let working_dir = resolve_placeholders(
-        &serde_json::Value::String(cfg.working_dir.clone()),
-        &ctx.plan.config,
-        &ctx.step_outputs,
-    )
-    .as_str()
-    .unwrap_or_default()
-    .to_owned();
-    let workspace = validate_workspace(ctx, &working_dir)?;
+    let workspace = ctx.working_directory(Some(&cfg.working_dir))?;
 
     if let Some(error) = &ctx.llm_keys.profile_error {
         return Err(failure(ctx, format!("invalid LLM settings: {error}")));
@@ -240,31 +238,6 @@ fn configure_api_auth(
         _ => {}
     }
     Ok(())
-}
-
-fn validate_workspace(ctx: &StepContext, raw: &str) -> Result<PathBuf, ExecutorError> {
-    if raw.trim().is_empty() {
-        return Err(failure(
-            ctx,
-            "agent working directory resolved to an empty path",
-        ));
-    }
-    let path = Path::new(raw).canonicalize().map_err(|error| {
-        failure(
-            ctx,
-            format!("cannot resolve agent working directory '{raw}': {error}"),
-        )
-    })?;
-    if !path.is_dir() {
-        return Err(failure(
-            ctx,
-            format!(
-                "agent working directory '{}' is not a directory",
-                path.display()
-            ),
-        ));
-    }
-    Ok(path)
 }
 
 fn objective_with_workflow_context(
@@ -1219,6 +1192,7 @@ mod tests {
                     ..Default::default()
                 },
                 storage_root: workspace.path().to_owned(),
+                workspace: None,
                 agent_audit: Default::default(),
             };
             let result = run(&ctx).await.unwrap();
