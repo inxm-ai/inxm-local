@@ -1543,6 +1543,7 @@ fn step_detail(
                         {
                             detail_block(
                                 ui,
+                                &detail_context,
                                 row_id.with("claude_calls"),
                                 "Claude calls",
                                 &crate::app::usage::step_calls_text(calls),

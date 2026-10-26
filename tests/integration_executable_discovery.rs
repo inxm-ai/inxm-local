@@ -167,6 +167,8 @@ fn verify_child(settings_path: &Path) {
                 progress: None,
                 human: None,
                 llm_keys: Default::default(),
+                claude_usage_enabled: false,
+                claude_prompts_enabled: false,
                 source: None,
             },
         )
