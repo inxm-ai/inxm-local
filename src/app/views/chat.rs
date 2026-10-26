@@ -3390,28 +3390,7 @@ fn format_output_value(value: &serde_json::Value) -> String {
 /// A one-line token-consumption summary for a finished run, or `None` when
 /// no prompt or agent step reported usage.
 fn token_usage_text(run: &Run, show_claude_usage: bool) -> Option<String> {
-    // Provider-reported Claude usage is exact and covers failed attempts, so
-    // it replaces the per-step summary whenever any call was recorded.
-    let claude = run.claude_totals();
-    if show_claude_usage && !claude.is_empty() {
-        return Some(crate::app::usage::run_totals_text(&claude));
-    }
-    let summary = run.token_usage_summary();
-    if summary.is_empty() {
-        return None;
-    }
-    let step_word = if summary.ai_steps() == 1 {
-        "AI step"
-    } else {
-        "AI steps"
-    };
-    Some(format!(
-        "Tokens: {} {step_word} — {} in / {} out ({} total).",
-        summary.ai_steps(),
-        summary.usage.input_tokens,
-        summary.usage.output_tokens,
-        summary.usage.total()
-    ))
+    crate::app::usage::RunTokenUsage::from_run(run, show_claude_usage).text()
 }
 
 /// Create a `RunBinding` from a `HumanRequest`-carrying event or a fresh run.
@@ -3439,6 +3418,7 @@ fn fill_binding(binding: &mut RunBinding, run: &Run) {
     binding.inputs = run.inputs.clone();
     let usage = run.token_usage_summary();
     binding.token_usage_total = (!usage.is_empty()).then_some(usage.usage.total());
+    binding.combined_token_usage = Some(crate::app::usage::RunTokenUsage::from_run(run, true));
     binding.claude_calls = run.archived_claude_calls.clone().into_iter().collect();
     for (step_id, sr) in &run.step_runs {
         if sr.status != StepRunStatus::Pending || !binding.iterations.contains_key(step_id) {
@@ -4147,6 +4127,53 @@ mod tests {
         assert!(!summary.contains("AI step"), "got: {summary}");
         let binding = binding_from_run(&run);
         assert_eq!(binding.claude_calls["summarize"].len(), 1);
+    }
+
+    #[test]
+    fn mixed_api_and_agent_usage_is_counted_with_detailed_tracking_on_or_off() {
+        let mut run = succeeded_run();
+        let mut prompt = crate::executor::StepRun::new("prompt");
+        prompt.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 100,
+            output_tokens: 20,
+        });
+        prompt.claude_calls = vec![crate::storage::llm_usage::ClaudeCallSummary {
+            call_id: "prompt-call".to_owned(),
+            attempt: 1,
+            iteration: None,
+            outcome: crate::llm::ClaudeCallOutcome::Ok,
+            usage: crate::llm::parse_claude_usage(&serde_json::json!({
+                "input_tokens": 100,
+                "output_tokens": 20
+            })),
+        }];
+        let mut agent = crate::executor::StepRun::new("agent");
+        agent.token_usage = Some(crate::storage::runs::TokenUsage {
+            input_tokens: 800,
+            output_tokens: 200,
+        });
+        run.step_runs.insert("prompt".to_owned(), prompt);
+        run.step_runs.insert("agent".to_owned(), agent);
+
+        let detailed = run_summary_text_with_usage(&run, true);
+        assert!(
+            detailed.contains(
+                "Tokens: 1 Claude API call + 1 AI step — 900 in / 220 out (1,120 total)."
+            ),
+            "got: {detailed}"
+        );
+        let basic = run_summary_text_with_usage(&run, false);
+        assert!(
+            basic.contains("Tokens: 2 AI steps — 900 in / 220 out (1120 total)."),
+            "got: {basic}"
+        );
+        assert!(!basic.contains("Claude"), "got: {basic}");
+        let binding = binding_from_run(&run);
+        assert_eq!(binding.token_usage_total, Some(1120));
+        assert_eq!(
+            binding.combined_token_usage.unwrap().totals(),
+            (Some(1120), 0)
+        );
     }
 
     #[test]
