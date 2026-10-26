@@ -2349,6 +2349,40 @@ mod tests {
         assert_eq!(storage(&state).unwrap().plans().list().unwrap().len(), 2);
     }
 
+    #[test]
+    fn import_refuses_a_plan_that_calls_a_non_allowlisted_tool() {
+        let (_tmp, state) = test_state();
+        let bundle = echo_bundle(&state);
+
+        let mut snapshot =
+            crate::tools::catalog::CatalogSnapshot::load_from_file(&state.paths.catalog_path)
+                .expect("seeded catalog snapshot");
+        let mut echo = catalog(&state)
+            .expect("seeded catalog")
+            .get("echo")
+            .expect("seeded echo tool")
+            .clone();
+        echo.allowlisted = false;
+        snapshot.upsert(echo).expect("disable echo");
+        snapshot
+            .save_to_file(&state.paths.catalog_path)
+            .expect("persist catalog");
+
+        let error = import_plan(
+            &state,
+            ImportPlanArgs {
+                bundle,
+                on_conflict: Default::default(),
+            },
+        )
+        .expect_err("a disabled tool must not be importable");
+        assert!(
+            error.to_string().contains("failed validation"),
+            "unexpected error: {error}"
+        );
+        assert!(storage(&state).unwrap().plans().list().unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn import_schema_exposes_an_explicit_conflict_policy() {
         let (_tmp, state) = test_state();
