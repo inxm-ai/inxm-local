@@ -115,6 +115,19 @@ pub enum UpdateCheckStatus {
     Failed,
 }
 
+/// Whether the settings view offers an API key field for `backend`. Account
+/// CLIs, Vertex and custom commands authenticate elsewhere; `Auto` resolves
+/// keys from the environment.
+fn shows_api_key_field(backend: BackendChoice) -> bool {
+    matches!(
+        backend,
+        BackendChoice::Claude
+            | BackendChoice::OpenAi
+            | BackendChoice::OpenAiCompatible
+            | BackendChoice::AnthropicCompatible
+    )
+}
+
 /// The backend picker (label + one-line description per [`BackendChoice`]),
 /// shared between the full Settings page and the first-run assistant so the
 /// list and its behavior exist in exactly one place. Returns whether the
@@ -361,6 +374,44 @@ pub fn show(
                     ui.add_space(8.0);
                 }
 
+                // Rendered independently of the CLI/command chain below: API
+                // backends also show the agent CLI executable field, and the key
+                // must stay editable alongside it.
+                if shows_api_key_field(state.draft.backend) {
+                    ui.label(RichText::new("API key").color(theme::text_muted()));
+                    let hint = if matches!(
+                        state.draft.backend,
+                        BackendChoice::OpenAiCompatible | BackendChoice::AnthropicCompatible
+                    ) {
+                        "optional for endpoints without authentication"
+                    } else {
+                        KEY_HINT
+                    };
+                    if widgets::text_edit(
+                        ui,
+                        egui::TextEdit::singleline(&mut state.draft.api_key)
+                            .password(true)
+                            .hint_text(hint)
+                            .desired_width(ui.available_width()),
+                    )
+                    .changed()
+                    {
+                        engine.send(EngineCommand::SaveSettings {
+                            settings: Box::new(state.draft.clone()),
+                        });
+                    }
+                    widgets::wrapped_label(
+                        ui,
+                        RichText::new(
+                            "Stored in plain text in settings.json inside the data dir — \
+                             prefer environment variables on shared machines.",
+                        )
+                        .size(theme::FONT_SMALL)
+                        .color(theme::text_faint()),
+                    );
+                    ui.add_space(8.0);
+                }
+
                 if matches!(
                     state.draft.backend,
                     BackendChoice::Codex | BackendChoice::ClaudeCode
@@ -502,42 +553,6 @@ pub fn show(
                              through {{PROMPT}} or stdin (which is then closed); plain text and \
                              common JSON/JSONL result fields are detected automatically while \
                              the complete output remains available as the audit transcript.",
-                        )
-                        .size(theme::FONT_SMALL)
-                        .color(theme::text_faint()),
-                    );
-                    ui.add_space(8.0);
-                } else if !matches!(
-                    state.draft.backend,
-                    BackendChoice::Auto | BackendChoice::GoogleVertex | BackendChoice::CustomCli
-                ) {
-                    ui.label(RichText::new("API key").color(theme::text_muted()));
-                    let hint = if matches!(
-                        state.draft.backend,
-                        BackendChoice::OpenAiCompatible | BackendChoice::AnthropicCompatible
-                    ) {
-                        "optional for endpoints without authentication"
-                    } else {
-                        KEY_HINT
-                    };
-                    if widgets::text_edit(
-                        ui,
-                        egui::TextEdit::singleline(&mut state.draft.api_key)
-                            .password(true)
-                            .hint_text(hint)
-                            .desired_width(ui.available_width()),
-                    )
-                    .changed()
-                    {
-                        engine.send(EngineCommand::SaveSettings {
-                            settings: Box::new(state.draft.clone()),
-                        });
-                    }
-                    widgets::wrapped_label(
-                        ui,
-                        RichText::new(
-                            "Stored in plain text in settings.json inside the data dir — \
-                             prefer environment variables on shared machines.",
                         )
                         .size(theme::FONT_SMALL)
                         .color(theme::text_faint()),
@@ -1216,5 +1231,41 @@ mod update_dialog_tests {
                 .iter()
                 .any(|shape| contains_text(&shape.shape, &expected))
         );
+    }
+}
+
+#[cfg(test)]
+mod api_key_field_tests {
+    use super::*;
+
+    #[test]
+    fn api_backends_show_the_key_field() {
+        for backend in [
+            BackendChoice::Claude,
+            BackendChoice::OpenAi,
+            BackendChoice::OpenAiCompatible,
+            BackendChoice::AnthropicCompatible,
+        ] {
+            assert!(
+                shows_api_key_field(backend),
+                "{backend:?} should show the API key field"
+            );
+        }
+    }
+
+    #[test]
+    fn account_vertex_custom_and_auto_hide_the_key_field() {
+        for backend in [
+            BackendChoice::Auto,
+            BackendChoice::Codex,
+            BackendChoice::ClaudeCode,
+            BackendChoice::GoogleVertex,
+            BackendChoice::CustomCli,
+        ] {
+            assert!(
+                !shows_api_key_field(backend),
+                "{backend:?} should hide the API key field"
+            );
+        }
     }
 }
