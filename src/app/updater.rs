@@ -26,7 +26,10 @@ const BINARY_NAME: &str = "inxm-local";
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Asset {
     pub name: String,
-    #[serde(rename = "browser_download_url", alias = "url")]
+    // GitHub assets carry both `url` (the API endpoint) and
+    // `browser_download_url`; aliasing `url` here makes every real release
+    // fail with "duplicate field". Only the browser URL is downloadable.
+    #[serde(rename = "browser_download_url")]
     pub url: String,
     #[serde(default)]
     pub digest: Option<String>,
@@ -1088,6 +1091,20 @@ mod tests {
                 "x86_64"
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn github_asset_shape_with_api_url_parses() {
+        let value = serde_json::json!({"draft":false,"prerelease":false,"tag_name":"v1.2.3",
+            "html_url":RELEASES_URL,"assets":[{
+                "url":"https://api.github.com/repos/inxm-ai/inxm-local/releases/assets/1",
+                "browser_download_url":"https://github.com/inxm-ai/inxm-local/releases/download/v1.2.3/a.dmg",
+                "name":"a.dmg","size":3,"digest":"sha256:abc"}]});
+        let parsed = Release::from_github_value(&value).unwrap();
+        assert_eq!(
+            parsed.assets[0].url,
+            "https://github.com/inxm-ai/inxm-local/releases/download/v1.2.3/a.dmg"
         );
     }
 
